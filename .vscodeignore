@@ -17,3 +17,4 @@ media/ollama-logo.svg
 media/screenshots/**
 releasenotes/**
 HANDOFF.md
+sample-workspace/**
