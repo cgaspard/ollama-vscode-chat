@@ -1,6 +1,6 @@
-// A tiny playground program for trying the LM Studio Code agent.
+// A tiny playground program for trying the Ollama Code agent.
 //
-// Open the LM Studio panel and ask things like:
+// Open the Ollama panel and ask things like:
 //   • "explain what app.js does"
 //   • "add a reverseString(s) function and call it in main"
 //   • "write a quick test for fib() and run it"
