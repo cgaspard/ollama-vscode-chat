@@ -14,5 +14,5 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "exclude": ["node_modules", "dist", "out"]
+  "exclude": ["node_modules", "dist", "out", "test"]
 }

@@ -6,6 +6,7 @@ import { initLogger, log, showLogs } from './logger';
 import { OpencodeServerManager } from './opencode/serverManager';
 import { BridgeDeps } from './panel/bridge';
 import { ChatViewProvider, openChatPanel } from './panel/chatViewProvider';
+import { Prefs } from './prefs';
 
 let server: OpencodeServerManager | undefined;
 
@@ -16,9 +17,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const cfg = getConfig();
   const servers = new ServerRegistry(context, cfg.ollamaBaseUrl);
   const ollama = new OllamaClient(servers.active().url);
-  server = new OpencodeServerManager(cfg, ollama);
+  const prefs = new Prefs(context);
+  server = new OpencodeServerManager(cfg, ollama, prefs);
 
-  const deps: BridgeDeps = { context, server, ollama, servers };
+  const deps: BridgeDeps = { context, server, ollama, servers, prefs };
 
   // The `secondarySidebar` viewsContainers slot needs VS Code >= 1.106. On
   // older builds, flip this context key so the activitybar fallback shows

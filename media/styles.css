@@ -745,6 +745,15 @@ body {
   letter-spacing: 0.4px;
   color: var(--vscode-descriptionForeground);
 }
+.ctx-foot-model {
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+.ctx-foot-hint {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
 .ctx-presets {
   display: flex;
   flex-wrap: wrap;

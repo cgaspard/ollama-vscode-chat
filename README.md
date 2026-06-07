@@ -6,7 +6,7 @@ Under the hood it drives the open-source [**OpenCode**](https://opencode.ai) age
 
 ## Demo
 
-![Ollama Code demo](media/sample.gif)
+![Ollama Code demo](media/sample-2x.gif)
 
 ## Why
 

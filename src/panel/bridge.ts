@@ -2,12 +2,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfig } from '../config';
+import { clampContext } from '../core/context';
 import { ServerRegistry } from '../connection';
-import { OllamaClient } from '../ollama/client';
+import { OllamaClient, OllamaModel } from '../ollama/client';
 import { log, logError } from '../logger';
 import { OpencodeClient } from '../opencode/client';
 import { OpencodeEvent, PromptBody } from '../opencode/protocol';
 import { OpencodeServerManager } from '../opencode/serverManager';
+import { Prefs } from '../prefs';
 import { HostToWebview, UiImage, UiModel, UiSession, WebviewToHost } from '../shared';
 
 export interface BridgeDeps {
@@ -15,6 +17,7 @@ export interface BridgeDeps {
   server: OpencodeServerManager;
   ollama: OllamaClient;
   servers: ServerRegistry;
+  prefs: Prefs;
 }
 
 /**
@@ -34,6 +37,7 @@ export class ChatBridge {
   private agentsWarned = false;
   private activeFile: { abs: string; rel: string; chars: number } | null = null;
   private editorSub: vscode.Disposable | undefined;
+  private messageSub: vscode.Disposable | undefined;
   private healthTimer: ReturnType<typeof setInterval> | undefined;
   private healthTicks = 0;
   private titleSink: ((t: string) => void) | undefined;
@@ -43,12 +47,13 @@ export class ChatBridge {
     private readonly deps: BridgeDeps,
   ) {
     this.agent = getConfig().agent;
-    webview.onDidReceiveMessage((m: WebviewToHost) => this.onMessage(m));
+    this.messageSub = webview.onDidReceiveMessage((m: WebviewToHost) => this.onMessage(m));
     this.editorSub = vscode.window.onDidChangeActiveTextEditor((e) => this.updateActiveFile(e));
   }
 
   dispose(): void {
     this.disposed = true;
+    this.messageSub?.dispose();
     this.eventAbort?.abort();
     this.editorSub?.dispose();
     if (this.healthTimer) {
@@ -80,7 +85,8 @@ export class ChatBridge {
         await this.init(); // came online → full setup + model load
       } else if (ok && this.connected) {
         if (++this.healthTicks % 3 === 0) {
-          await this.refreshModelsToWebview().catch(() => undefined); // ~every 15s
+          const list = await this.refreshModelsToWebview().catch(() => [] as OllamaModel[]); // ~every 15s
+          await this.keepWarm(list).catch(() => undefined);
         }
       } else if (!ok && this.connected) {
         this.connected = false;
@@ -132,6 +138,9 @@ export class ChatBridge {
   }
 
   private async onMessage(msg: WebviewToHost): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
     try {
       switch (msg.type) {
         case 'ready':
@@ -150,8 +159,11 @@ export class ChatBridge {
         case 'unloadModel':
           await this.handleUnloadModel(msg.modelID);
           break;
-        case 'setContextSize':
-          await this.setContextSize(msg.tokens);
+        case 'setModelCtx':
+          await this.setModelCtx(msg.modelID, msg.numCtx);
+          break;
+        case 'setKeepAlive':
+          await this.setKeepAlive(msg.value);
           break;
         case 'refreshModels':
           await this.refreshModelsToWebview();
@@ -265,6 +277,7 @@ export class ChatBridge {
         serverReady: false,
         ollamaConnected: false,
         minContext: cfg.minContextLength,
+        keepAlive: this.keepAlive(),
       });
       this.post({ type: 'status', text: `Can't reach Ollama at ${active.url}`, kind: 'warn' });
       return;
@@ -286,6 +299,7 @@ export class ChatBridge {
         serverReady: false,
         ollamaConnected: true,
         minContext: cfg.minContextLength,
+        keepAlive: this.keepAlive(),
       });
       return;
     }
@@ -307,6 +321,7 @@ export class ChatBridge {
       serverReady: true,
       ollamaConnected: true,
       minContext: cfg.minContextLength,
+      keepAlive: this.keepAlive(),
     });
 
     await this.sendSessions();
@@ -377,18 +392,53 @@ export class ChatBridge {
     await this.init();
   }
 
-  private async refreshModelsToWebview(): Promise<void> {
-    const models = await this.loadModels();
-    this.post({ type: 'models', models, currentModel: this.currentModel });
+  private async refreshModelsToWebview(): Promise<OllamaModel[]> {
+    const list = await this.deps.ollama.listModels();
+    this.post({ type: 'models', models: this.mapModels(list), currentModel: this.currentModel });
+    return list;
+  }
+
+  /**
+   * Re-assert keep_alive on the currently-selected model if it's loaded.
+   * OpenCode's chat requests reset Ollama's keep_alive to its ~5min default, so
+   * without this the user's keepAlive choice wouldn't stick. Re-loading with the
+   * same num_ctx is a cheap no-op on Ollama's side (no weight reload), it just
+   * refreshes the timer. Skipped when keep_alive is "0" (unload).
+   */
+  private async keepWarm(list: OllamaModel[]): Promise<void> {
+    if (!this.currentModel) {
+      return;
+    }
+    const ka = this.keepAlive();
+    if (ka === '0' || ka === '0s') {
+      return;
+    }
+    const m = list.find((x) => x.id === this.currentModel);
+    if (!m || m.state !== 'loaded') {
+      return;
+    }
+    const ctx = m.loadedContextLength || this.ctxFor(m.id, m.maxContextLength);
+    await this.deps.ollama.loadModel(m.id, ctx, ka);
+  }
+
+  /** Effective num_ctx for a model: per-model override, else the global default, clamped to the model's max. */
+  private ctxFor(modelID: string, maxContextLength?: number): number {
+    const target = this.deps.prefs.ctxOverride(modelID) ?? getConfig().minContextLength;
+    return clampContext(target, maxContextLength);
+  }
+
+  /** Effective keep_alive: UI override, else the `ollamaCode.keepAlive` setting. */
+  private keepAlive(): string {
+    return this.deps.prefs.keepAlive() ?? getConfig().keepAlive;
   }
 
   private async handleLoadModel(modelID: string): Promise<void> {
-    const cfg = getConfig();
+    const model = await this.deps.ollama.getModel(modelID).catch(() => undefined);
     this.post({ type: 'status', text: `Loading ${modelID}…` });
     const result = await this.deps.ollama.ensureContext(
       modelID,
-      cfg.minContextLength,
-      cfg.keepAlive,
+      this.ctxFor(modelID, model?.maxContextLength),
+      this.keepAlive(),
       (m) => this.post({ type: 'status', text: m }),
     );
     if (result.note) {
@@ -400,22 +450,40 @@ export class ChatBridge {
     await this.refreshModelsToWebview();
   }
 
-  /** Persist a new context window and restart OpenCode so it takes effect. */
-  private async setContextSize(tokens: number): Promise<void> {
-    try {
-      await vscode.workspace
-        .getConfiguration('ollamaCode')
-        .update('minContextLength', tokens, vscode.ConfigurationTarget.Global);
-    } catch (err) {
-      logError('update minContextLength', err);
-    }
-    this.post({ type: 'status', text: `Setting context to ${Math.round(tokens / 1024)}K — restarting…` });
+  /**
+   * Set a model's context budget. This is OpenCode's `limit.context` (how much
+   * it packs before compacting + the meter), baked into the provider config at
+   * server start, so restart to apply it. It does not resize the Ollama runner
+   * (that's the server's OLLAMA_CONTEXT_LENGTH).
+   */
+  private async setModelCtx(modelID: string, numCtx: number): Promise<void> {
+    await this.deps.prefs.setCtx(modelID, numCtx);
+    await this.rebuildServer(`Setting ${modelID} context budget to ${Math.round(numCtx / 1024)}K — restarting…`);
+    this.post({ type: 'status', text: '' });
+    await this.refreshModelsToWebview();
+  }
+
+  /**
+   * Set the global keep_alive. This only affects our /api/generate preload and
+   * the keep-warm poll (the /v1 chat provider doesn't carry keep_alive), so no
+   * server restart is needed — just re-apply to the loaded model now.
+   */
+  private async setKeepAlive(value: string): Promise<void> {
+    await this.deps.prefs.setKeepAlive(value);
+    const list = await this.deps.ollama.listModels().catch(() => [] as OllamaModel[]);
+    await this.keepWarm(list).catch(() => undefined);
+    await this.refreshModelsToWebview();
+  }
+
+  /** Tear down and re-initialize OpenCode (rebuilds OPENCODE_CONFIG_CONTENT)
+   * while preserving the current session. */
+  private async rebuildServer(status: string): Promise<void> {
+    this.post({ type: 'status', text: status });
     this.eventAbort?.abort();
     this.eventAbort = undefined;
     this.client = undefined;
     this.deps.server.dispose();
     await this.init();
-    this.post({ type: 'status', text: '' });
   }
 
   private async handleUnloadModel(modelID: string): Promise<void> {
@@ -430,13 +498,17 @@ export class ChatBridge {
   }
 
   private async loadModels(): Promise<UiModel[]> {
-    const list = await this.deps.ollama.listModels();
+    return this.mapModels(await this.deps.ollama.listModels());
+  }
+
+  private mapModels(list: OllamaModel[]): UiModel[] {
     return list.map((m) => ({
       id: m.id,
       name: m.displayName,
       loaded: m.state === 'loaded',
       contextLength: m.loadedContextLength,
       maxContextLength: m.maxContextLength,
+      numCtx: this.ctxFor(m.id, m.maxContextLength),
       toolUse: m.toolUse,
       vision: m.vision,
     }));
@@ -515,10 +587,11 @@ export class ChatBridge {
     const cfg = getConfig();
 
     if (cfg.autoEnsureContext) {
+      const model = await this.deps.ollama.getModel(this.currentModel).catch(() => undefined);
       const result = await this.deps.ollama.ensureContext(
         this.currentModel,
-        cfg.minContextLength,
-        cfg.keepAlive,
+        this.ctxFor(this.currentModel, model?.maxContextLength),
+        this.keepAlive(),
         (m) => this.post({ type: 'status', text: m }),
       );
       if (result.note) {

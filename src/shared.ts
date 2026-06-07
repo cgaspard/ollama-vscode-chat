@@ -5,8 +5,9 @@ export interface UiModel {
   id: string;
   name: string;
   loaded: boolean;
-  contextLength?: number;
+  contextLength?: number; // actually-loaded num_ctx (from /api/ps)
   maxContextLength?: number;
+  numCtx?: number; // effective configured num_ctx (override or global default, clamped to max)
   toolUse?: boolean;
   vision?: boolean;
 }
@@ -34,6 +35,7 @@ export type HostToWebview =
       serverReady: boolean;
       ollamaConnected: boolean;
       minContext: number;
+      keepAlive: string;
     }
   | { type: 'models'; models: UiModel[]; currentModel: string | null }
   | { type: 'servers'; servers: UiServer[]; activeId: string; connected: boolean }
@@ -60,7 +62,8 @@ export type WebviewToHost =
   | { type: 'selectModel'; modelID: string }
   | { type: 'loadModel'; modelID: string }
   | { type: 'unloadModel'; modelID: string }
-  | { type: 'setContextSize'; tokens: number }
+  | { type: 'setModelCtx'; modelID: string; numCtx: number }
+  | { type: 'setKeepAlive'; value: string }
   | { type: 'refreshModels' }
   | { type: 'listServers' }
   | { type: 'addServer'; name: string; url: string }

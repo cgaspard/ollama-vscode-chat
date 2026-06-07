@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { normalizeOllamaUrl } from './config';
+import { normalizeOllamaUrl } from './core/url';
 
 export interface LmServer {
   id: string;

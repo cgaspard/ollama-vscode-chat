@@ -164,7 +164,7 @@
         "ollamaCode.keepAlive": {
           "type": "string",
           "default": "30m",
-          "description": "Ollama keep_alive — how long a model stays loaded in memory after use (e.g. '30m', '1h', '-1' to keep forever, '0' to unload immediately)."
+          "description": "Default Ollama keep_alive — how long a model stays loaded after use. Use a duration like '5m', '30m', '1h', '8760h' (~forever), or '0' to unload after each use. Also settable per session from the model menu."
         }
       }
     }
@@ -173,9 +173,12 @@
     "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && node esbuild.js",
     "check-types": "tsc --noEmit",
+    "check-types:test": "tsc -p tsconfig.test.json",
     "watch": "node esbuild.js --watch",
     "package": "npm run check-types && node esbuild.js --production",
-    "package:vsix": "vsce package"
+    "package:vsix": "vsce package",
+    "test": "npm run check-types:test && node esbuild.test.js && node --test \"out-test/**/*.test.js\"",
+    "test:watch": "node esbuild.test.js && node --test --watch \"out-test/**/*.test.js\""
   },
   "dependencies": {
     "marked": "^12.0.0"

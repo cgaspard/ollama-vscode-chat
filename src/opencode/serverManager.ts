@@ -4,13 +4,20 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
+import { clampContext } from '../core/context';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
+import { Prefs } from '../prefs';
 import { OpencodeClient } from './client';
+import { BUILD_PROMPT, PLAN_PROMPT } from './prompts';
 
 export interface ServerStartResult {
   baseUrl: string;
   client: OpencodeClient;
+}
+
+export interface Disposable {
+  dispose(): void;
 }
 
 /**
@@ -23,14 +30,28 @@ export class OpencodeServerManager {
   private baseUrl: string | undefined;
   private client: OpencodeClient | undefined;
   private starting: Promise<ServerStartResult> | undefined;
+  private readonly exitListeners = new Set<() => void>();
+  /** Procs we killed on purpose, so their `exit` doesn't trigger reconnects. */
+  private readonly killed = new WeakSet<ChildProcess>();
 
   constructor(
     private readonly cfg: ExtensionConfig,
     private readonly ollama: OllamaClient,
+    private readonly prefs: Prefs,
   ) {}
 
   get isRunning(): boolean {
     return !!this.proc && !this.proc.killed;
+  }
+
+  /**
+   * Register a callback fired whenever the server process exits unexpectedly.
+   * Multiple bridges (sidebar + secondary + editor tabs) share one manager, so
+   * each registers its own listener and disposes it on teardown.
+   */
+  addExitListener(cb: () => void): Disposable {
+    this.exitListeners.add(cb);
+    return { dispose: () => this.exitListeners.delete(cb) };
   }
 
   /** Start (or return the in-flight start of) the server. Idempotent. */
@@ -86,10 +107,25 @@ export class OpencodeServerManager {
     this.client = client;
 
     proc.on('exit', (code, signal) => {
-      log(`opencode server exited (code=${code}, signal=${signal})`);
-      this.proc = undefined;
-      this.baseUrl = undefined;
-      this.client = undefined;
+      const intentional = this.killed.has(proc);
+      log(`opencode server exited (code=${code}, signal=${signal}${intentional ? ', intentional' : ''})`);
+      this.killed.delete(proc);
+      if (this.proc === proc) {
+        this.proc = undefined;
+        this.baseUrl = undefined;
+        this.client = undefined;
+      }
+      // Only notify on an *unexpected* exit so bridges can self-heal; a dispose
+      // / restart we triggered ourselves must not kick a reconnect storm.
+      if (!intentional) {
+        for (const cb of [...this.exitListeners]) {
+          try {
+            cb();
+          } catch (err) {
+            logError('exit listener threw', err);
+          }
+        }
+      }
     });
 
     return { baseUrl, client };
@@ -165,15 +201,24 @@ export class OpencodeServerManager {
 
   /** Build the OPENCODE_CONFIG_CONTENT JSON injecting the Ollama provider. */
   private async buildConfigContent(): Promise<string> {
+    // Read fresh so context-size changes apply on the next restart.
+    const cfg = getConfig();
+    const defaultCtx = cfg.minContextLength;
+
     const models: Record<string, Record<string, unknown>> = {};
-    const ctx = getConfig().minContextLength; // read fresh so context-size changes apply on restart
     try {
       const list = await this.ollama.listModels();
       for (const m of list) {
-        // Declare each real (installed) model so it shows in the picker, with
-        // capabilities (OpenCode drops image attachments unless the model is
-        // declared with attachment + image modality) and a context limit /
-        // num_ctx aligned to the window we ensure-load.
+        // Per-model context budget: the user's override, else the global
+        // minContextLength, clamped to the model's real maximum. With the /v1
+        // provider this drives OpenCode's `limit.context` — how much context it
+        // packs before compacting, and the meter denominator. It does NOT resize
+        // the Ollama runner itself: Ollama's /v1 endpoint ignores num_ctx and
+        // loads at the server's OLLAMA_CONTEXT_LENGTH. (The native /api provider
+        // honored num_ctx but emits an object finishReason that fails OpenCode's
+        // validation and loops the model, so we can't use it.)
+        const target = this.prefs.ctxOverride(m.id) ?? defaultCtx;
+        const ctx = clampContext(target, m.maxContextLength);
         models[m.id] = {
           name: m.displayName,
           attachment: !!m.vision,
@@ -184,30 +229,39 @@ export class OpencodeServerManager {
             output: ['text'],
           },
           limit: { context: ctx, output: Math.min(8192, Math.floor(ctx / 2)) },
-          options: { num_ctx: ctx },
         };
       }
     } catch (err) {
       logError('could not enumerate Ollama models for config', err);
     }
-    // Augment OpenCode's native `ollama` provider (auto-detected from the
-    // running server) with our installed models, and pin its base URL.
+
+    // Use OpenCode's bundled `@ai-sdk/openai-compatible` provider against
+    // Ollama's OpenAI-compatible /v1 endpoint.
     //
-    // IMPORTANT: OpenCode's bundled `ollama` provider is @ai-sdk/openai-compatible
-    // and defaults its baseURL to http://localhost:11434/v1. It does NOT use the
-    // OLLAMA_HOST env var for actual API calls (only for auto-detection), so
-    // without this every chat request hits *localhost* — which 404s with
-    // "model '<x>' not found" whenever the active server is a remote host that
-    // has models localhost doesn't. Pinning options.baseURL to the active
-    // server's OpenAI-compatible endpoint (`<host>/v1`) is what makes
-    // multi-server / remote hosts work. num_ctx is still honored per-model via
-    // each model's `options.num_ctx` (passed through in the request body).
-    // `includeUsage` asks the /v1 endpoint to stream token counts back — Ollama
-    // reports them, which drives the real (non-estimated) context meter.
+    // We pin `options.baseURL` to the active server's `/v1` because the bundled
+    // provider hardcodes http://localhost:11434/v1 and ignores OLLAMA_HOST for
+    // API calls — without this, remote/multi-server hosts 404 with "model not
+    // found" (discovery hits the right host but chat hits localhost).
+    // `includeUsage` makes Ollama stream real token counts (drives the meter).
+    //
+    // NOTE: we deliberately do NOT use the native `ollama-ai-provider-v2`
+    // (/api). It would honor per-model num_ctx, but this opencode build rejects
+    // its object-shaped `finishReason` (ZodError in session.processor), which
+    // breaks turn completion and makes the agent loop re-run the model several
+    // times per prompt (duplicate replies). /v1 returns a clean string
+    // finishReason. Consequence: the runner window is set by the Ollama server's
+    // OLLAMA_CONTEXT_LENGTH, not by us; our per-model context drives only
+    // OpenCode's `limit.context` (compaction budget + meter). keep_alive is
+    // applied out-of-band by the bridge's keep-warm poll via /api/generate.
     const config = {
       $schema: 'https://opencode.ai/config.json',
+      agent: {
+        build: { prompt: BUILD_PROMPT },
+        plan: { prompt: PLAN_PROMPT },
+      },
       provider: {
         ollama: {
+          npm: '@ai-sdk/openai-compatible',
           name: 'Ollama',
           options: { baseURL: `${this.ollama.getBaseUrl()}/v1`, includeUsage: true },
           ...(Object.keys(models).length ? { models } : {}),
@@ -256,6 +310,7 @@ export class OpencodeServerManager {
   dispose(): void {
     if (this.proc && !this.proc.killed) {
       log('stopping opencode server');
+      this.killed.add(this.proc); // mark intentional so exit doesn't trigger reconnect
       this.proc.kill();
     }
     this.proc = undefined;

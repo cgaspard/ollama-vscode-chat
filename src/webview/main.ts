@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import { computeWindow, contextPresets, formatTokens } from '../core/context';
 import type { MessageWithParts, OpencodeEvent, Part } from '../opencode/protocol';
 import type { HostToWebview, UiImage, UiModel, UiServer, UiSession, WebviewToHost } from '../shared';
 
@@ -28,6 +29,7 @@ interface State {
   thinking: boolean;
   pendingImages: UiImage[];
   minContext: number;
+  keepAlive: string;
   realTokens: number;
   compacted: boolean;
   loadingModels: Set<string>;
@@ -49,6 +51,7 @@ const state: State = {
   thinking: persisted.thinking ?? true,
   pendingImages: [],
   minContext: 32768,
+  keepAlive: '30m',
   realTokens: 0,
   compacted: false,
   loadingModels: new Set<string>(),
@@ -175,8 +178,10 @@ function build(): void {
       </div>
       <div id="model-menu-list" class="model-menu-list"></div>
       <div class="model-menu-foot">
-        <span class="ctx-foot-label">Context window</span>
+        <span class="ctx-foot-label">Context window <span id="ctx-foot-model" class="ctx-foot-model"></span></span>
         <div id="ctx-presets" class="ctx-presets"></div>
+        <span class="ctx-foot-label">Keep models loaded</span>
+        <div id="ka-presets" class="ctx-presets"></div>
       </div>
     </div>
     <div id="server-menu" class="model-menu hidden">
@@ -540,34 +545,73 @@ function renderModelMenu(): void {
     modelMenuList.appendChild(row);
   }
   renderCtxPresets();
+  renderKeepAlive();
 }
 
 function renderCtxPresets(): void {
   const el = document.getElementById('ctx-presets');
+  const label = document.getElementById('ctx-foot-model');
   if (!el) {
     return;
   }
   const m = state.models.find((x) => x.id === state.currentModel);
-  const max = m?.maxContextLength || 131072;
-  const presets = [8192, 16384, 32768, 65536, 131072, 262144].filter((v) => v <= max);
-  if (max && !presets.includes(max)) {
-    presets.push(max);
+  if (label) {
+    label.textContent = m ? `· ${m.name}` : '';
   }
+  if (!m) {
+    el.innerHTML = '<span class="ctx-foot-hint">Select a model</span>';
+    return;
+  }
+  const current = m.numCtx || state.minContext;
+  const presets = contextPresets(m.maxContextLength);
   el.innerHTML = '';
   for (const v of presets) {
     const b = document.createElement('button');
-    b.className = 'ctx-preset' + (v === state.minContext ? ' active' : '');
+    b.className = 'ctx-preset' + (v === current ? ' active' : '');
     b.textContent = formatTokens(v);
-    b.title = v.toLocaleString() + ' tokens';
+    b.title = `Load ${m.name} with a ${v.toLocaleString()}-token context window`;
     b.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (v === state.minContext) {
+      if (v === current || !state.currentModel) {
         return;
       }
-      state.minContext = v;
+      m.numCtx = v; // optimistic
       renderCtxPresets();
       renderMeter();
-      post({ type: 'setContextSize', tokens: v });
+      post({ type: 'setModelCtx', modelID: state.currentModel, numCtx: v });
+    });
+    el.appendChild(b);
+  }
+}
+
+const KEEP_ALIVE_PRESETS: { label: string; value: string }[] = [
+  { label: 'Off', value: '0' },
+  { label: '5m', value: '5m' },
+  { label: '30m', value: '30m' },
+  { label: '1h', value: '1h' },
+  { label: '8h', value: '8h' },
+  { label: 'Forever', value: '8760h' },
+];
+
+function renderKeepAlive(): void {
+  const el = document.getElementById('ka-presets');
+  if (!el) {
+    return;
+  }
+  el.innerHTML = '';
+  for (const p of KEEP_ALIVE_PRESETS) {
+    const b = document.createElement('button');
+    b.className = 'ctx-preset' + (p.value === state.keepAlive ? ' active' : '');
+    b.textContent = p.label;
+    b.title = `Keep models loaded for ${p.label.toLowerCase()}`;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (p.value === state.keepAlive) {
+        return;
+      }
+      state.keepAlive = p.value;
+      renderKeepAlive();
+      post({ type: 'setKeepAlive', value: p.value });
     });
     el.appendChild(b);
   }
@@ -700,30 +744,10 @@ function renderConnection(): void {
 // Context usage meter
 // ---------------------------------------------------------------------------
 function currentWindow(): number {
+  // Loaded window if loaded, else this model's configured num_ctx (override or
+  // global default) clamped to the model's max. Shared with the host + tests.
   const m = state.models.find((x) => x.id === state.currentModel);
-  if (!m) {
-    return state.minContext || 0;
-  }
-  // If loaded, show the actual loaded window; otherwise the window we'd load it
-  // at: min(configured minContext, the model's own max) — so it changes per model.
-  if (m.contextLength) {
-    return m.contextLength;
-  }
-  if (m.maxContextLength) {
-    return Math.min(state.minContext || m.maxContextLength, m.maxContextLength);
-  }
-  return state.minContext || 0;
-}
-
-function formatTokens(n: number): string {
-  // 1024-base so context windows read as 32K / 64K / 128K (not 33K).
-  if (n >= 1024 * 1024) {
-    return (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + 'M';
-  }
-  if (n >= 1024) {
-    return Math.round(n / 1024) + 'K';
-  }
-  return String(n);
+  return computeWindow(m, m?.numCtx || state.minContext);
 }
 
 function tokensUsed(t: any): number {
@@ -733,16 +757,16 @@ function tokensUsed(t: any): number {
   return (t.input || 0) + (t.output || 0) + (t.reasoning || 0);
 }
 
-// OpenCode's openai-compatible provider doesn't report token usage for LM
-// Studio, so estimate locally. Calibrated against a proxy measurement: the
-// build agent's system prompt + tool definitions are ~11k tokens; plan is
-// lighter. Plus ~1 token / 4 chars of visible conversation, plus images.
+// The native ollama provider doesn't report token usage, so estimate locally.
+// Calibrated against a measured request: our build agent prompt + tool
+// definitions are ~9k tokens; plan is lighter. Plus ~1 token / 4 chars of
+// visible conversation, plus images.
 function estimateUsed(): number {
   let chars = 0;
   for (const ps of partState.values()) {
     chars += ps.buffer.length;
   }
-  const overhead = state.agent === 'plan' ? 6000 : 11000;
+  const overhead = state.agent === 'plan' ? 6000 : 9000;
   const images = document.querySelectorAll('.msg-img').length + state.pendingImages.length;
   const fileTokens =
     state.activeFile && state.includeActiveFile ? Math.ceil(state.activeFile.chars / 4) : 0;
@@ -1272,6 +1296,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.serverReady = msg.serverReady;
       state.ollamaConnected = msg.ollamaConnected;
       state.minContext = msg.minContext;
+      state.keepAlive = msg.keepAlive;
       renderModels();
       renderMeter();
       renderServers();

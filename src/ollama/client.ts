@@ -149,7 +149,11 @@ export class OllamaClient {
     const res = await fetch(`${this.rest}/api/generate`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: modelId, keep_alive: keepAlive, options: { num_ctx: contextLength } }),
+      body: JSON.stringify({
+        model: modelId,
+        keep_alive: coerceKeepAlive(keepAlive),
+        options: { num_ctx: contextLength },
+      }),
       signal: TIMEOUT(600000),
     });
     if (!res.ok) {
@@ -190,6 +194,20 @@ export class OllamaClient {
 
 function prettyName(id: string): string {
   return id.replace(/:latest$/, '');
+}
+
+/**
+ * Ollama's keep_alive accepts a duration string ("5m", "1h") OR a number of
+ * seconds, where -1 means "forever" and 0 means "unload now". Its duration
+ * parser rejects bare integers like "-1"/"0" as strings, so coerce integer-like
+ * values to numbers; pass real durations through unchanged.
+ */
+function coerceKeepAlive(v: string | number): string | number {
+  if (typeof v === 'number') {
+    return v;
+  }
+  const s = v.trim();
+  return /^-?\d+$/.test(s) ? Number(s) : s;
 }
 
 /** model_info has a key like "llama.context_length" / "qwen3.context_length". */
