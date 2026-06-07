@@ -29,10 +29,13 @@ export class ChatBridge {
   private eventAbort: AbortController | undefined;
   private disposed = false;
   private connected = false;
+  private connecting = false;
   private currentTitle = '';
   private agentsWarned = false;
   private activeFile: { abs: string; rel: string; chars: number } | null = null;
   private editorSub: vscode.Disposable | undefined;
+  private healthTimer: ReturnType<typeof setInterval> | undefined;
+  private healthTicks = 0;
   private titleSink: ((t: string) => void) | undefined;
 
   constructor(
@@ -48,6 +51,42 @@ export class ChatBridge {
     this.disposed = true;
     this.eventAbort?.abort();
     this.editorSub?.dispose();
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = undefined;
+    }
+  }
+
+  /**
+   * Poll Ollama so the panel self-heals: when the server comes online after
+   * being down we auto-connect (no manual Retry), and while connected we
+   * periodically refresh the model list so newly loaded/pulled models appear.
+   */
+  private startHealthPoll(): void {
+    if (this.healthTimer || this.disposed) {
+      return;
+    }
+    this.healthTimer = setInterval(async () => {
+      if (this.disposed || this.connecting) {
+        return;
+      }
+      let ok = false;
+      try {
+        ok = await this.deps.ollama.checkConnection();
+      } catch {
+        ok = false;
+      }
+      if (ok && !this.connected) {
+        await this.init(); // came online → full setup + model load
+      } else if (ok && this.connected) {
+        if (++this.healthTicks % 3 === 0) {
+          await this.refreshModelsToWebview().catch(() => undefined); // ~every 15s
+        }
+      } else if (!ok && this.connected) {
+        this.connected = false;
+        this.postServers(false); // went offline → show the banner
+      }
+    }, 5000);
   }
 
   private updateActiveFile(editor: vscode.TextEditor | undefined): void {
@@ -190,6 +229,19 @@ export class ChatBridge {
   }
 
   private async init(): Promise<void> {
+    this.startHealthPoll();
+    if (this.connecting) {
+      return;
+    }
+    this.connecting = true;
+    try {
+      await this.doInit();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async doInit(): Promise<void> {
     const cfg = getConfig();
     const active = this.deps.servers.active();
     this.deps.ollama.setBaseUrl(active.url);
