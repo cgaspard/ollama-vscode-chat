@@ -150,6 +150,9 @@ export class ChatBridge {
         case 'unloadModel':
           await this.handleUnloadModel(msg.modelID);
           break;
+        case 'setContextSize':
+          await this.setContextSize(msg.tokens);
+          break;
         case 'refreshModels':
           await this.refreshModelsToWebview();
           break;
@@ -397,6 +400,24 @@ export class ChatBridge {
     await this.refreshModelsToWebview();
   }
 
+  /** Persist a new context window and restart OpenCode so it takes effect. */
+  private async setContextSize(tokens: number): Promise<void> {
+    try {
+      await vscode.workspace
+        .getConfiguration('ollamaCode')
+        .update('minContextLength', tokens, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+      logError('update minContextLength', err);
+    }
+    this.post({ type: 'status', text: `Setting context to ${Math.round(tokens / 1024)}K — restarting…` });
+    this.eventAbort?.abort();
+    this.eventAbort = undefined;
+    this.client = undefined;
+    this.deps.server.dispose();
+    await this.init();
+    this.post({ type: 'status', text: '' });
+  }
+
   private async handleUnloadModel(modelID: string): Promise<void> {
     this.post({ type: 'status', text: `Unloading ${modelID}…` });
     try {
@@ -510,15 +531,19 @@ export class ChatBridge {
       this.post({ type: 'status', text: '' });
     }
 
+    // Identity: OpenCode's base prompt makes the model call itself "opencode".
+    // Our system text is appended, so this overrides the user-facing identity.
+    let system =
+      'You are "Ollama Code", an agentic coding assistant running on the user\'s machine against their local Ollama models. If asked your name or what you are, identify as "Ollama Code". Never identify yourself as "opencode".';
+
     // Thinking control. Qwen-family models honor the `/no_think` soft switch
     // (consumed by the chat template); for others fall back to a system hint.
     let promptText = text;
-    let system: string | undefined;
     if (!thinking) {
       if (/qwen/i.test(this.currentModel)) {
         promptText = `${text}\n\n/no_think`;
       } else {
-        system = 'Answer directly and concisely. Do not produce private chain-of-thought or <think> reasoning blocks.';
+        system += '\n\nAnswer directly and concisely. Do not produce private chain-of-thought or <think> reasoning blocks.';
       }
     }
 

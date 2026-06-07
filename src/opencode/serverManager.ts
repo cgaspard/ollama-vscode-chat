@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { ExtensionConfig } from '../config';
+import { ExtensionConfig, getConfig } from '../config';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
 import { OpencodeClient } from './client';
@@ -166,7 +166,7 @@ export class OpencodeServerManager {
   /** Build the OPENCODE_CONFIG_CONTENT JSON injecting the Ollama provider. */
   private async buildConfigContent(): Promise<string> {
     const models: Record<string, Record<string, unknown>> = {};
-    const ctx = this.cfg.minContextLength;
+    const ctx = getConfig().minContextLength; // read fresh so context-size changes apply on restart
     try {
       const list = await this.ollama.listModels();
       for (const m of list) {
@@ -202,12 +202,14 @@ export class OpencodeServerManager {
     // server's OpenAI-compatible endpoint (`<host>/v1`) is what makes
     // multi-server / remote hosts work. num_ctx is still honored per-model via
     // each model's `options.num_ctx` (passed through in the request body).
+    // `includeUsage` asks the /v1 endpoint to stream token counts back — Ollama
+    // reports them, which drives the real (non-estimated) context meter.
     const config = {
       $schema: 'https://opencode.ai/config.json',
       provider: {
         ollama: {
           name: 'Ollama',
-          options: { baseURL: `${this.ollama.getBaseUrl()}/v1` },
+          options: { baseURL: `${this.ollama.getBaseUrl()}/v1`, includeUsage: true },
           ...(Object.keys(models).length ? { models } : {}),
         },
       },

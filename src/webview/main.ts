@@ -174,6 +174,10 @@ function build(): void {
         <button id="model-refresh" class="icon-btn" title="Rescan models">${icon.refresh}</button>
       </div>
       <div id="model-menu-list" class="model-menu-list"></div>
+      <div class="model-menu-foot">
+        <span class="ctx-foot-label">Context window</span>
+        <div id="ctx-presets" class="ctx-presets"></div>
+      </div>
     </div>
     <div id="server-menu" class="model-menu hidden">
       <div class="model-menu-head"><span>Ollama servers</span></div>
@@ -535,6 +539,38 @@ function renderModelMenu(): void {
     });
     modelMenuList.appendChild(row);
   }
+  renderCtxPresets();
+}
+
+function renderCtxPresets(): void {
+  const el = document.getElementById('ctx-presets');
+  if (!el) {
+    return;
+  }
+  const m = state.models.find((x) => x.id === state.currentModel);
+  const max = m?.maxContextLength || 131072;
+  const presets = [8192, 16384, 32768, 65536, 131072, 262144].filter((v) => v <= max);
+  if (max && !presets.includes(max)) {
+    presets.push(max);
+  }
+  el.innerHTML = '';
+  for (const v of presets) {
+    const b = document.createElement('button');
+    b.className = 'ctx-preset' + (v === state.minContext ? ' active' : '');
+    b.textContent = formatTokens(v);
+    b.title = v.toLocaleString() + ' tokens';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (v === state.minContext) {
+        return;
+      }
+      state.minContext = v;
+      renderCtxPresets();
+      renderMeter();
+      post({ type: 'setContextSize', tokens: v });
+    });
+    el.appendChild(b);
+  }
 }
 
 function toggleModelMenu(): void {
@@ -680,11 +716,12 @@ function currentWindow(): number {
 }
 
 function formatTokens(n: number): string {
-  if (n >= 1_000_000) {
-    return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  // 1024-base so context windows read as 32K / 64K / 128K (not 33K).
+  if (n >= 1024 * 1024) {
+    return (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '') + 'M';
   }
-  if (n >= 1000) {
-    return (n / 1000).toFixed(n >= 10_000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  if (n >= 1024) {
+    return Math.round(n / 1024) + 'K';
   }
   return String(n);
 }

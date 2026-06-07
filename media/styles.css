@@ -732,6 +732,41 @@ body {
   overflow-y: auto;
   padding: 4px;
 }
+.model-menu-foot {
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ctx-foot-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--vscode-descriptionForeground);
+}
+.ctx-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.ctx-preset {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  background: transparent;
+  color: var(--vscode-foreground);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ctx-preset:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.12));
+}
+.ctx-preset.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
 .model-empty {
   padding: 16px;
   font-size: 12px;
