@@ -1,0 +1,190 @@
+{
+  "name": "ollama-code",
+  "displayName": "Ollama Code",
+  "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
+  "version": "0.1.0",
+  "publisher": "cgaspard",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "ollama",
+    "opencode",
+    "agent",
+    "local llm",
+    "claude code",
+    "codex",
+    "llama"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cgaspard/ollama-vscode-chat"
+  },
+  "bugs": {
+    "url": "https://github.com/cgaspard/ollama-vscode-chat/issues"
+  },
+  "homepage": "https://github.com/cgaspard/ollama-vscode-chat#readme",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ollamaCode",
+          "title": "Ollama",
+          "icon": "media/activity-icon.svg",
+          "when": "ollamaCode:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "ollamaCodeSecondary",
+          "title": "Ollama",
+          "icon": "media/activity-icon.svg",
+          "when": "!ollamaCode:doesNotSupportSecondarySidebar"
+        }
+      ]
+    },
+    "views": {
+      "ollamaCode": [
+        {
+          "id": "ollamaCode.chat",
+          "name": "Ollama",
+          "type": "webview",
+          "when": "ollamaCode:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "ollamaCodeSecondary": [
+        {
+          "id": "ollamaCode.chatSecondary",
+          "name": "Ollama",
+          "type": "webview",
+          "when": "!ollamaCode:doesNotSupportSecondarySidebar"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ollamaCode.newChat",
+        "title": "Ollama Code: New Chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ollamaCode.openInTab",
+        "title": "Ollama Code: Open Chat in Editor Tab",
+        "icon": "$(window)"
+      },
+      {
+        "command": "ollamaCode.history",
+        "title": "Ollama Code: Session History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "ollamaCode.restartServer",
+        "title": "Ollama Code: Restart OpenCode Server"
+      },
+      {
+        "command": "ollamaCode.showLogs",
+        "title": "Ollama Code: Show Logs"
+      },
+      {
+        "command": "ollamaCode.focus",
+        "title": "Ollama Code: Focus Chat"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ollamaCode.newChat",
+          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ollamaCode.history",
+          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ollamaCode.openInTab",
+          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ollama Code",
+      "properties": {
+        "ollamaCode.ollamaBaseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Base URL of the Ollama server (host root, e.g. http://127.0.0.1:11434)."
+        },
+        "ollamaCode.opencodePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the opencode binary. Leave empty to auto-detect (PATH, ~/.opencode/bin/opencode)."
+        },
+        "ollamaCode.serverPort": {
+          "type": "number",
+          "default": 0,
+          "description": "Port for the embedded OpenCode server. 0 = pick a free port automatically."
+        },
+        "ollamaCode.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model id to select by default (must match an installed Ollama model, e.g. llama3.2:3b). Empty = first available."
+        },
+        "ollamaCode.agent": {
+          "type": "string",
+          "enum": [
+            "build",
+            "plan"
+          ],
+          "default": "build",
+          "description": "OpenCode agent. 'build' can edit files and run tools; 'plan' is read-only."
+        },
+        "ollamaCode.autoEnsureContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Before prompting, ensure the selected Ollama model is loaded with an adequate context window (num_ctx). Prevents context overflow from small default windows."
+        },
+        "ollamaCode.minContextLength": {
+          "type": "number",
+          "default": 32768,
+          "description": "Minimum context window (num_ctx) to load models with when autoEnsureContext is enabled. OpenCode's agent system prompt + tools alone use ~11k tokens, so keep this comfortably large."
+        },
+        "ollamaCode.keepAlive": {
+          "type": "string",
+          "default": "30m",
+          "description": "Ollama keep_alive — how long a model stays loaded in memory after use (e.g. '30m', '1h', '-1' to keep forever, '0' to unload immediately)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && node esbuild.js",
+    "check-types": "tsc --noEmit",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run check-types && node esbuild.js --production",
+    "package:vsix": "vsce package"
+  },
+  "dependencies": {
+    "marked": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.104.0",
+    "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}
