@@ -644,7 +644,11 @@ function renderConnection(): void {
   const active = state.servers.find((s) => s.id === state.activeServerId);
   connBanner.classList.remove('hidden');
   connBanner.innerHTML = `
-    <span class="conn-msg">Can't reach Ollama at <b>${escapeHtml(active?.url ?? '')}</b> — start its server or pick another.</span>
+    <span class="conn-ico"><svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1 5h2v7h-2V7zm0 9h2v2h-2v-2z"/></svg></span>
+    <span class="conn-text">
+      <span class="conn-title">Can't reach Ollama</span>
+      <span class="conn-sub"><code>${escapeHtml(active?.url ?? '')}</code> isn't responding — start the server or switch.</span>
+    </span>
     <span class="conn-actions">
       <button class="conn-btn" id="conn-retry">Retry</button>
       <button class="conn-btn primary" id="conn-servers">Servers</button>
