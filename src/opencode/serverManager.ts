@@ -191,14 +191,23 @@ export class OpencodeServerManager {
       logError('could not enumerate Ollama models for config', err);
     }
     // Augment OpenCode's native `ollama` provider (auto-detected from the
-    // running server via OLLAMA_HOST) with our installed models. We do NOT set
-    // `npm`/`baseURL` so the native provider (which speaks /api/chat and honors
-    // num_ctx) stays in control.
+    // running server) with our installed models, and pin its base URL.
+    //
+    // IMPORTANT: OpenCode's bundled `ollama` provider is @ai-sdk/openai-compatible
+    // and defaults its baseURL to http://localhost:11434/v1. It does NOT use the
+    // OLLAMA_HOST env var for actual API calls (only for auto-detection), so
+    // without this every chat request hits *localhost* — which 404s with
+    // "model '<x>' not found" whenever the active server is a remote host that
+    // has models localhost doesn't. Pinning options.baseURL to the active
+    // server's OpenAI-compatible endpoint (`<host>/v1`) is what makes
+    // multi-server / remote hosts work. num_ctx is still honored per-model via
+    // each model's `options.num_ctx` (passed through in the request body).
     const config = {
       $schema: 'https://opencode.ai/config.json',
       provider: {
         ollama: {
-          name: 'Ollama (local)',
+          name: 'Ollama',
+          options: { baseURL: `${this.ollama.getBaseUrl()}/v1` },
           ...(Object.keys(models).length ? { models } : {}),
         },
       },

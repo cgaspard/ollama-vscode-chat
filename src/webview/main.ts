@@ -665,7 +665,18 @@ function renderConnection(): void {
 // ---------------------------------------------------------------------------
 function currentWindow(): number {
   const m = state.models.find((x) => x.id === state.currentModel);
-  return (m && m.contextLength) || state.minContext || 0;
+  if (!m) {
+    return state.minContext || 0;
+  }
+  // If loaded, show the actual loaded window; otherwise the window we'd load it
+  // at: min(configured minContext, the model's own max) — so it changes per model.
+  if (m.contextLength) {
+    return m.contextLength;
+  }
+  if (m.maxContextLength) {
+    return Math.min(state.minContext || m.maxContextLength, m.maxContextLength);
+  }
+  return state.minContext || 0;
 }
 
 function formatTokens(n: number): string {
