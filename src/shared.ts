@@ -78,5 +78,7 @@ export type WebviewToHost =
   | { type: 'clearAllSessions' }
   | { type: 'abort' }
   | { type: 'permission'; sessionID: string; permissionID: string; response: PermissionResponse }
+  | { type: 'questionReply'; requestID: string; answers: string[][] }
+  | { type: 'questionReject'; requestID: string }
   | { type: 'openFile'; path: string }
   | { type: 'retryConnect' };

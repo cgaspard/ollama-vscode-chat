@@ -255,6 +255,11 @@ export class OpencodeServerManager {
     // applied out-of-band by the bridge's keep-warm poll via /api/generate.
     const config = {
       $schema: 'https://opencode.ai/config.json',
+      // Let the model ask the user clarifying questions via the built-in
+      // `question` tool. "allow" surfaces the picker immediately (the picker is
+      // the interaction; no redundant approval gate). The bridge relays the
+      // `question.asked` event and replies via the /question API.
+      permission: { question: 'allow' as const },
       agent: {
         build: { prompt: BUILD_PROMPT },
         plan: { prompt: PLAN_PROMPT },
@@ -316,5 +321,8 @@ export class OpencodeServerManager {
     this.proc = undefined;
     this.baseUrl = undefined;
     this.client = undefined;
+    // Drop any in-flight start so a dispose mid-startup (e.g. restart()) can't
+    // have its stale promise returned by the next start() — forces a fresh one.
+    this.starting = undefined;
   }
 }

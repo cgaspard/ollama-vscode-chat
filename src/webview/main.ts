@@ -1,5 +1,6 @@
 import { marked } from 'marked';
 import { computeWindow, contextPresets, formatTokens } from '../core/context';
+import { buildAnswers, isEmptyAnswer, parseQuestionBlob, QInfo } from '../core/question';
 import type { MessageWithParts, OpencodeEvent, Part } from '../opencode/protocol';
 import type { HostToWebview, UiImage, UiModel, UiServer, UiSession, WebviewToHost } from '../shared';
 
@@ -66,6 +67,7 @@ const messageEls = new Map<string, { el: HTMLElement; partsEl: HTMLElement; role
 const partState = new Map<string, { el: HTMLElement; buffer: string; type: string }>();
 const roleByMessage = new Map<string, string>();
 const permissionEls = new Map<string, HTMLElement>();
+const questionEls = new Map<string, HTMLElement>();
 const toolCollapsed = new Map<string, boolean>(); // partID -> collapsed?
 
 // ---------------------------------------------------------------------------
@@ -804,15 +806,19 @@ function clearConversation(): void {
   partState.clear();
   roleByMessage.clear();
   permissionEls.clear();
+  questionEls.clear();
+  toolCollapsed.clear();
   hideWorking();
-  messagesEl.querySelectorAll('.msg, .perm-card, .sys-chip, .error-bubble').forEach((n) => n.remove());
+  messagesEl
+    .querySelectorAll('.msg, .perm-card, .question-card, .sys-chip, .error-bubble')
+    .forEach((n) => n.remove());
   state.realTokens = 0;
   state.compacted = false;
   toggleWelcome();
 }
 
 function toggleWelcome(): void {
-  const hasContent = messagesEl.querySelector('.msg, .perm-card, .error-bubble');
+  const hasContent = messagesEl.querySelector('.msg, .perm-card, .question-card, .error-bubble');
   welcomeEl.style.display = hasContent ? 'none' : 'flex';
 }
 
@@ -869,6 +875,20 @@ function renderTextLike(ps: { el: HTMLElement; buffer: string; type: string }): 
     }
     (ps.el.querySelector('.reasoning-body') as HTMLElement).innerHTML = mdToHtml(ps.buffer);
   } else {
+    // Fallback: a model that printed the AskUserQuestion JSON as text instead
+    // of calling the `question` tool. Once the blob parses, render the picker
+    // in place of the raw JSON (requestID null → answers go back as a message).
+    const qs = parseQuestionBlob(ps.buffer);
+    if (qs && !ps.el.dataset.questionRendered) {
+      ps.el.dataset.questionRendered = '1';
+      ps.el.style.display = 'none';
+      ps.el.innerHTML = '';
+      renderQuestion(null, qs);
+      return;
+    }
+    if (ps.el.dataset.questionRendered) {
+      return; // already swapped for a picker — ignore further deltas
+    }
     ps.el.innerHTML = mdToHtml(ps.buffer);
     enhanceCode(ps.el);
   }
@@ -1069,6 +1089,223 @@ function resolvePermission(id: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Questions (the built-in `question`/ask tool — and a text fallback)
+// ---------------------------------------------------------------------------
+/**
+ * Render an interactive picker for a question request and reply over the
+ * /question API. `requestID` null means this came from the text fallback
+ * (a model that printed the JSON instead of calling the tool) — in that case
+ * we send the chosen labels back as a normal follow-up message instead.
+ */
+function renderQuestion(requestID: string | null, questions: QInfo[]): void {
+  const key = requestID ?? `local-${questions.map((q) => q.question).join('|')}`;
+  if (questionEls.has(key)) {
+    return;
+  }
+  const card = document.createElement('div');
+  card.className = 'question-card';
+
+  // Per-question selection state: a Set of chosen labels + the custom text.
+  const picks = questions.map(() => ({ chosen: new Set<string>(), custom: '' }));
+  const tabbed = questions.length > 1;
+  let active = 0;
+
+  // A single question auto-advances on a single-select pick only when there's
+  // no free-text input to fill in. Multi-select or "type your own" needs Next.
+  const autoAdvances = (qi: number): boolean => {
+    const q = questions[qi];
+    const allowCustom = q.custom !== false || (q.options ?? []).length === 0;
+    return !q.multiple && !allowCustom;
+  };
+  const isAnswered = (qi: number): boolean =>
+    picks[qi].chosen.size > 0 || picks[qi].custom.trim().length > 0;
+
+  // --- Tab strip (only when there's more than one question) ------------------
+  let tabsEl: HTMLElement | undefined;
+  if (tabbed) {
+    tabsEl = document.createElement('div');
+    tabsEl.className = 'question-tabs';
+    questions.forEach((q, qi) => {
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'question-tab';
+      tab.dataset.qi = String(qi);
+      tab.innerHTML = `<span class="question-tab-num">${qi + 1}</span><span class="question-tab-label">${escapeHtml(
+        q.header || `Q${qi + 1}`,
+      )}</span><span class="question-tab-check">✓</span>`;
+      tab.addEventListener('click', () => show(qi));
+      tabsEl!.appendChild(tab);
+    });
+    card.appendChild(tabsEl);
+  }
+
+  // --- Question panels (one shown at a time) ---------------------------------
+  const panels: HTMLElement[] = questions.map((q, qi) => {
+    const block = document.createElement('div');
+    block.className = 'question-block';
+    const hasOptions = (q.options ?? []).length > 0;
+    // Force the free-text input on when there are no options, so the picker is
+    // never a dead end (only "Skip") regardless of what the model sends.
+    const allowCustom = q.custom !== false || !hasOptions;
+    const multiple = !!q.multiple;
+    block.innerHTML = `
+      ${q.header ? `<div class="question-chip">${escapeHtml(q.header)}</div>` : ''}
+      <div class="question-text">${escapeHtml(q.question)}</div>
+      <div class="question-options"></div>
+      ${allowCustom ? `<input class="question-custom" type="text" placeholder="Type a custom answer…" />` : ''}`;
+    const optsEl = block.querySelector('.question-options') as HTMLElement;
+    (q.options ?? []).forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'question-opt';
+      btn.innerHTML = `<span class="question-opt-label">${escapeHtml(opt.label)}</span>${
+        opt.description ? `<span class="question-opt-desc">${escapeHtml(opt.description)}</span>` : ''
+      }`;
+      btn.addEventListener('click', () => {
+        if (card.classList.contains('resolved')) {
+          return;
+        }
+        const sel = picks[qi].chosen;
+        if (multiple) {
+          if (sel.has(opt.label)) {
+            sel.delete(opt.label);
+            btn.classList.remove('selected');
+          } else {
+            sel.add(opt.label);
+            btn.classList.add('selected');
+          }
+        } else {
+          sel.clear();
+          optsEl.querySelectorAll('.question-opt').forEach((b) => b.classList.remove('selected'));
+          sel.add(opt.label);
+          btn.classList.add('selected');
+        }
+        syncChrome();
+        // Single-select with no custom field → jump straight to the next tab.
+        if (autoAdvances(qi) && qi < questions.length - 1) {
+          show(qi + 1);
+        }
+      });
+      optsEl.appendChild(btn);
+    });
+    if (allowCustom) {
+      const input = block.querySelector('.question-custom') as HTMLInputElement;
+      input.addEventListener('input', () => {
+        picks[qi].custom = input.value;
+        syncChrome();
+      });
+    }
+    card.appendChild(block);
+    return block;
+  });
+
+  // --- Footer: Back / Next / Submit / Skip -----------------------------------
+  const actions = document.createElement('div');
+  actions.className = 'question-actions';
+  actions.innerHTML = `
+    ${tabbed ? '<button class="question-back" type="button">Back</button>' : ''}
+    ${tabbed ? '<button class="question-next" type="button">Next</button>' : ''}
+    <button class="question-submit" type="button">Send answer</button>
+    <button class="question-skip" type="button">Skip</button>`;
+  card.appendChild(actions);
+  const backBtn = actions.querySelector('.question-back') as HTMLButtonElement | null;
+  const nextBtn = actions.querySelector('.question-next') as HTMLButtonElement | null;
+  const submitBtn = actions.querySelector('.question-submit') as HTMLButtonElement;
+
+  // Reflect current tab + answered-state across the strip and footer buttons.
+  function syncChrome(): void {
+    panels.forEach((p, qi) => (p.style.display = qi === active ? '' : 'none'));
+    if (tabsEl) {
+      tabsEl.querySelectorAll('.question-tab').forEach((t) => {
+        const qi = Number((t as HTMLElement).dataset.qi);
+        t.classList.toggle('active', qi === active);
+        t.classList.toggle('answered', isAnswered(qi));
+      });
+    }
+    if (backBtn) {
+      backBtn.style.display = active > 0 ? '' : 'none';
+    }
+    const onLast = active === questions.length - 1;
+    if (nextBtn) {
+      nextBtn.style.display = onLast ? 'none' : '';
+    }
+    // Submit only on the last tab (or always when not tabbed), enabled once
+    // every question has an answer.
+    submitBtn.style.display = tabbed && !onLast ? 'none' : '';
+    submitBtn.disabled = questions.some((_, qi) => !isAnswered(qi));
+  }
+
+  function show(qi: number): void {
+    if (card.classList.contains('resolved')) {
+      return;
+    }
+    active = Math.max(0, Math.min(questions.length - 1, qi));
+    syncChrome();
+    const input = panels[active].querySelector('.question-custom') as HTMLInputElement | null;
+    input?.focus();
+    scrollToBottom();
+  }
+
+  backBtn?.addEventListener('click', () => show(active - 1));
+  nextBtn?.addEventListener('click', () => show(active + 1));
+
+  const lock = (note: string) => {
+    card.querySelectorAll('button, input').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    card.classList.add('resolved');
+    const n = document.createElement('div');
+    n.className = 'question-resolved';
+    n.textContent = note;
+    card.appendChild(n);
+  };
+
+  const submit = () => {
+    if (card.classList.contains('resolved')) {
+      return;
+    }
+    // One answer array per question: chosen labels + any custom text.
+    const answers = buildAnswers(picks);
+    if (isEmptyAnswer(answers)) {
+      return; // nothing chosen — keep the card open
+    }
+    if (requestID) {
+      post({ type: 'questionReply', requestID, answers });
+    } else {
+      // Fallback path: no real request to reply to — echo the picks as a message.
+      const text = questions
+        .map((q, i) => `${q.header || q.question}: ${answers[i].join(', ')}`)
+        .join('\n');
+      post({ type: 'send', text, thinking: false });
+    }
+    lock(`Answered: ${answers.map((a) => a.join(', ')).filter(Boolean).join(' · ')}`);
+  };
+
+  submitBtn.addEventListener('click', submit);
+  actions.querySelector('.question-skip')!.addEventListener('click', () => {
+    if (card.classList.contains('resolved')) {
+      return;
+    }
+    if (requestID) {
+      post({ type: 'questionReject', requestID });
+    }
+    lock('Skipped');
+  });
+
+  messagesEl.appendChild(card);
+  questionEls.set(key, card);
+  syncChrome();
+  toggleWelcome();
+  scrollToBottom();
+}
+
+function resolveQuestion(id: string): void {
+  const card = questionEls.get(id);
+  if (card && !card.classList.contains('resolved')) {
+    card.querySelectorAll('button, input').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    card.classList.add('resolved');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Typing indicator / errors / status
 // ---------------------------------------------------------------------------
 function showWorking(label = 'Working…'): void {
@@ -1259,6 +1496,7 @@ function handleEvent(event: OpencodeEvent): void {
       const ps = partState.get(p.partID);
       ps?.el.remove();
       partState.delete(p.partID);
+      toolCollapsed.delete(p.partID);
       break;
     }
     case 'permission.asked':
@@ -1266,6 +1504,13 @@ function handleEvent(event: OpencodeEvent): void {
       break;
     case 'permission.replied':
       resolvePermission(p.id ?? p.permissionID);
+      break;
+    case 'question.asked':
+      renderQuestion(p.id, p.questions ?? []);
+      break;
+    case 'question.replied':
+    case 'question.rejected':
+      resolveQuestion(p.requestID ?? p.id);
       break;
     case 'session.idle':
       setBusy(false);

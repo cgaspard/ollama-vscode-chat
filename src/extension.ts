@@ -64,7 +64,10 @@ export function activate(context: vscode.ExtensionContext): void {
         { location: vscode.ProgressLocation.Notification, title: 'Restarting OpenCode server…' },
         async () => {
           try {
-            await server!.restart();
+            if (!server) {
+              throw new Error('Extension is not fully activated yet.');
+            }
+            await server.restart();
             vscode.window.showInformationMessage('Ollama Code: OpenCode server restarted.');
           } catch (err) {
             vscode.window.showErrorMessage(

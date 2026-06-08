@@ -1,12 +1,17 @@
-import { log, logError } from '../logger';
+import { nextDelay } from '../core/backoff';
+import { logError } from '../logger';
 import {
   MessageWithParts,
   OpencodeEvent,
   PermissionResponse,
   PromptBody,
   ProvidersResponse,
+  QuestionAnswer,
   Session,
 } from './protocol';
+
+/** Default per-request timeout so a stalled server can't hang the UI forever. */
+const REQ_TIMEOUT_MS = 30000;
 
 /**
  * Thin HTTP client for a running OpenCode server. Uses the global `fetch`
@@ -22,6 +27,7 @@ export class OpencodeClient {
       method,
       headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -87,6 +93,20 @@ export class OpencodeClient {
   }
 
   /**
+   * Answer a pending question from the built-in `question` tool. `answers` has
+   * one entry per question (in order); each entry is the list of chosen option
+   * labels (plus any typed custom answer).
+   */
+  async replyQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void> {
+    await this.req('POST', `/question/${requestID}/reply`, { answers });
+  }
+
+  /** Dismiss a pending question without answering (the run continues). */
+  async rejectQuestion(requestID: string): Promise<void> {
+    await this.req('POST', `/question/${requestID}/reject`, {});
+  }
+
+  /**
    * Subscribe to the global SSE event stream. Calls `onEvent` for every event.
    * Automatically reconnects until `signal` aborts. Resolves only when aborted.
    */
@@ -94,12 +114,14 @@ export class OpencodeClient {
     onEvent: (event: OpencodeEvent) => void,
     signal: AbortSignal,
   ): Promise<void> {
+    let attempt = 0;
     while (!signal.aborted) {
       try {
         const res = await fetch(`${this.baseUrl}/event`, { signal });
         if (!res.ok || !res.body) {
           throw new Error(`event stream HTTP ${res.status}`);
         }
+        attempt = 0; // connected — reset backoff
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -108,7 +130,9 @@ export class OpencodeClient {
           if (done) {
             break;
           }
-          buffer += decoder.decode(value, { stream: true });
+          // Normalize CRLF so the \n\n block delimiter and `data:` prefix match
+          // regardless of whether the server emits LF or CRLF line endings.
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
           let idx: number;
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const block = buffer.slice(0, idx);
@@ -133,8 +157,11 @@ export class OpencodeClient {
         if (signal.aborted) {
           return;
         }
-        logError('event stream interrupted, reconnecting in 1s', err);
-        await new Promise((r) => setTimeout(r, 1000));
+        // Exponential backoff (1s → 2s → … → 30s) so a downed server isn't
+        // hammered every second; reset to 1s on the next successful connect.
+        const delay = nextDelay(++attempt, { base: 1000, max: 30000 });
+        logError(`event stream interrupted, reconnecting in ${Math.round(delay / 1000)}s`, err);
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
   }

@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfig } from '../config';
 import { clampContext } from '../core/context';
+import { humanizeError } from '../core/errors';
 import { ServerRegistry } from '../connection';
 import { OllamaClient, OllamaModel } from '../ollama/client';
 import { log, logError } from '../logger';
@@ -229,6 +230,12 @@ export class ChatBridge {
         case 'permission':
           await this.client?.respondPermission(msg.sessionID, msg.permissionID, msg.response);
           break;
+        case 'questionReply':
+          await this.client?.replyQuestion(msg.requestID, msg.answers);
+          break;
+        case 'questionReject':
+          await this.client?.rejectQuestion(msg.requestID);
+          break;
         case 'openFile':
           await this.openFile(msg.path);
           break;
@@ -238,7 +245,7 @@ export class ChatBridge {
       }
     } catch (err) {
       logError(`handling ${msg.type}`, err);
-      this.post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      this.post({ type: 'error', message: humanizeError(err, { subject: 'Ollama' }) });
       this.post({ type: 'busy', busy: false });
     }
   }
@@ -288,7 +295,7 @@ export class ChatBridge {
     try {
       started = await this.deps.server.start();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = humanizeError(err, { subject: 'the OpenCode server' });
       this.post({ type: 'error', message });
       this.post({
         type: 'init',
@@ -360,7 +367,9 @@ export class ChatBridge {
     }
     const estTokens = Math.round(bytes / 4);
     const win = getConfig().minContextLength;
-    if (estTokens >= win * 0.4) {
+    // Guard against a non-positive context setting making the threshold `>= 0`
+    // (which would warn on every workspace that has an AGENTS.md/CLAUDE.md).
+    if (win > 0 && estTokens >= win * 0.4) {
       this.agentsWarned = true;
       const pct = Math.round((estTokens / win) * 100);
       const over = estTokens >= win;
@@ -515,7 +524,10 @@ export class ChatBridge {
   }
 
   private async newSession(announce = true): Promise<void> {
-    const session = await this.client!.createSession('New chat');
+    if (!this.client) {
+      throw new Error('OpenCode server is not running.');
+    }
+    const session = await this.client.createSession('New chat');
     this.currentSessionID = session.id;
     this.updateTitle('New chat');
     this.post({ type: 'cleared' });
@@ -678,7 +690,10 @@ export class ChatBridge {
   /** Forward only events that belong to the active session (plus globals). */
   private relayEvent(event: OpencodeEvent): void {
     const sid = sessionIdOf(event);
-    if (sid && this.currentSessionID && sid !== this.currentSessionID) {
+    // Drop a session-scoped event unless it's for the active session. Also drop
+    // it when no session is active yet (sid set, currentSessionID null) so a
+    // stray event mid-init can't leak into the webview.
+    if (sid && sid !== this.currentSessionID) {
       return;
     }
     this.post({ type: 'event', event });

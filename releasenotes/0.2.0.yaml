@@ -1,0 +1,20 @@
+version: 0.2.0
+date: 2026-06-08
+highlights:
+  - The model can now ask you clarifying questions mid-task via OpenCode's built-in question tool — answered through an interactive in-chat picker instead of raw JSON.
+  - A batch of connection-reliability fixes so a stalled or downed OpenCode server can no longer hang or spam the panel.
+added:
+  - Interactive question/ask support — when the model needs a decision, it renders a picker (single- or multi-select, with an optional free-text answer) and the run pauses until you reply via the /question API.
+  - Multi-question picker is a tabbed wizard — numbered tabs you can jump between, single-select auto-advances to the next question, Back/Next navigation, and Submit on the last tab once everything is answered.
+  - Fallback rendering — if a model prints the question JSON as text instead of calling the tool, it's still detected and shown as the same picker.
+removed: []
+changed:
+  - Connection errors surface a friendly "Lost connection — reconnecting…" message instead of a raw "fetch failed", via the shared error humanizer.
+  - The agent prompt now steers the model to act on a question answer (not re-ask), keep option descriptions neutral (using "(Recommended)" to recommend), and offer relevant, mutually-exclusive options.
+fixed:
+  - OpenCode HTTP requests now have a 30s timeout, so a stalled server can no longer hang the panel indefinitely.
+  - The SSE event stream reconnects with exponential backoff (1s→30s) instead of hammering every second while a server is down, and tolerates CRLF line endings.
+  - Fixed a server restart race where a dispose mid-startup could resurrect a killed process's connection.
+  - Guarded a non-null assertion in new-session creation and the restart command so a dropped server surfaces a clear message instead of a cryptic crash.
+  - minContextLength is validated (integer, minimum) and no longer triggers a spurious AGENTS.md warning when set to zero.
+  - CSP nonces use crypto.randomBytes; cleaned up a small webview map leak; test type-checking now gates packaging.

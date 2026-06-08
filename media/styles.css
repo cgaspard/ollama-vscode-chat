@@ -482,6 +482,186 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
+/* Question picker (the built-in `question`/ask tool) */
+.question-card {
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* Tab strip (multi-question wizard) */
+.question-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+}
+.question-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-foreground);
+  border-radius: 999px;
+  padding: 3px 10px 3px 4px;
+  cursor: pointer;
+  font-size: 11px;
+  max-width: 100%;
+}
+.question-tab-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  color: var(--vscode-foreground);
+  font-size: 10px;
+  flex: none;
+}
+.question-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.question-tab-check {
+  display: none;
+  color: var(--accent);
+  font-size: 11px;
+}
+.question-tab.answered .question-tab-check {
+  display: inline;
+}
+.question-tab.answered .question-tab-num {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.question-tab.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.question-tab.active .question-tab-num {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.question-chip {
+  display: inline-block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  margin-bottom: 6px;
+}
+.question-text {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.question-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-foreground);
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  width: 100%;
+}
+.question-opt:hover {
+  border-color: var(--accent);
+}
+.question-opt.selected {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+.question-opt-label {
+  font-weight: 600;
+}
+.question-opt-desc {
+  font-size: 11px;
+  opacity: 0.8;
+}
+.question-custom {
+  margin-top: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--vscode-input-border, rgba(128, 128, 128, 0.4));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.question-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.question-submit {
+  border: none;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.question-skip,
+.question-back,
+.question-next {
+  /* Solid secondary-button look so they read clearly as buttons (not text). */
+  border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, rgba(128, 128, 128, 0.6)));
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.18));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.question-skip:hover,
+.question-back:hover,
+.question-next:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+/* Keep Skip pushed to the right, away from Back/Next/Submit. */
+.question-skip {
+  margin-left: auto;
+}
+.question-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.question-card button:disabled,
+.question-card input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.question-card.resolved {
+  opacity: 0.75;
+}
+.question-resolved {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
 .error-bubble {
   border: 1px solid var(--vscode-inputValidation-errorBorder, #e35d6a);
   background: var(--vscode-inputValidation-errorBackground, rgba(227, 93, 106, 0.12));

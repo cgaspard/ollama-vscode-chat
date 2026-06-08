@@ -138,6 +138,41 @@ export interface PermissionRequest {
 
 export type PermissionResponse = 'once' | 'always' | 'reject';
 
+// ---- Questions (the built-in `question`/ask tool) ------------------------
+// Mirrors the server's v2 question API: the model calls the `question` tool,
+// the server emits `question.asked` with this shape, and the client replies
+// via POST /question/{id}/reply with one answer array per question (each entry
+// is the list of chosen option labels), or rejects via /question/{id}/reject.
+
+export interface QuestionOption {
+  /** Display text (1-5 words). */
+  label: string;
+  /** Explanation of the choice. */
+  description: string;
+}
+
+export interface QuestionInfo {
+  /** The complete question text. */
+  question: string;
+  /** Very short label / chip (max ~30 chars). */
+  header: string;
+  options: QuestionOption[];
+  /** Allow selecting multiple options. */
+  multiple?: boolean;
+  /** Allow a typed custom answer (default true). */
+  custom?: boolean;
+}
+
+export interface QuestionRequest {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: { messageID: string; callID: string };
+}
+
+/** One answer per question, in order; each is the list of selected labels. */
+export type QuestionAnswer = string[];
+
 // ---- Events --------------------------------------------------------------
 
 export interface OpencodeEvent {
