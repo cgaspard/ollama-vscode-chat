@@ -5,3 +5,5 @@ out-test/
 *.vsix
 .DS_Store
 .claude/scheduled_tasks.lock
+# Bundled OpenCode binary is fetched at package time, never committed.
+bin/

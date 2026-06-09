@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
+import { resolveBinaryPath } from '../core/binary';
 import { clampContext } from '../core/context';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
@@ -38,6 +39,10 @@ export class OpencodeServerManager {
     private readonly cfg: ExtensionConfig,
     private readonly ollama: OllamaClient,
     private readonly prefs: Prefs,
+    /** Extension install dir — holds the bundled `bin/opencode[.exe]`. */
+    private readonly extensionPath: string,
+    /** Private data dir for our managed server, isolated from the user's. */
+    private readonly dataDir: string,
   ) {}
 
   get isRunning(): boolean {
@@ -71,29 +76,25 @@ export class OpencodeServerManager {
   private async doStart(): Promise<ServerStartResult> {
     const bin = await this.resolveBinary();
     if (!bin) {
+      // The extension bundles a platform binary, so this is effectively
+      // unreachable in shipped builds; it only fires for a corrupt install or
+      // a bad `opencodePath` override.
       throw new Error(
-        'opencode binary not found. Install it (e.g. `brew install sst/tap/opencode` or `npm i -g opencode-ai`) or set "ollamaCode.opencodePath".',
+        'opencode binary not found. The bundled binary may be missing or unreadable; reinstall the extension, or set "ollamaCode.opencodePath" to a valid opencode binary.',
       );
     }
+    await this.prepareBundledBinary(bin);
 
     const configContent = await this.buildConfigContent();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+    const env = this.buildEnv(configContent);
 
     log(`starting opencode server: ${bin} serve --port ${this.cfg.serverPort} (cwd=${cwd})`);
 
     const proc = spawn(
       bin,
       ['serve', '--port', String(this.cfg.serverPort), '--hostname', '127.0.0.1'],
-      {
-        cwd,
-        env: {
-          ...process.env,
-          OPENCODE_CONFIG_CONTENT: configContent,
-          // Point OpenCode's native ollama provider at the active server.
-          OLLAMA_HOST: this.ollama.getBaseUrl(),
-          NO_COLOR: '1',
-        },
-      },
+      { cwd, env },
     );
     this.proc = proc;
 
@@ -199,6 +200,36 @@ export class OpencodeServerManager {
     throw new Error('opencode server did not become healthy');
   }
 
+  /**
+   * Environment for the managed server. Pins OpenCode's data/state/config/cache
+   * dirs under our private `dataDir` (via the XDG vars OpenCode honors on all
+   * platforms) so this instance can never share session/auth/state with a
+   * user's own OpenCode install — regardless of version. Config itself is still
+   * injected in-memory via OPENCODE_CONFIG_CONTENT; XDG_CONFIG_HOME just keeps
+   * any file OpenCode writes out of the user's real config dir.
+   */
+  private buildEnv(configContent: string): NodeJS.ProcessEnv {
+    const sub = (name: string) => path.join(this.dataDir, name);
+    // Best-effort: create the root so OpenCode doesn't fail on a missing dir.
+    try {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+    } catch (err) {
+      logError('could not create opencode data dir', err);
+    }
+    return {
+      ...process.env,
+      OPENCODE_CONFIG_CONTENT: configContent,
+      // Point OpenCode's native ollama provider at the active server.
+      OLLAMA_HOST: this.ollama.getBaseUrl(),
+      NO_COLOR: '1',
+      // Sandbox all on-disk state to our managed dir.
+      XDG_DATA_HOME: sub('data'),
+      XDG_CONFIG_HOME: sub('config'),
+      XDG_CACHE_HOME: sub('cache'),
+      XDG_STATE_HOME: sub('state'),
+    };
+  }
+
   /** Build the OPENCODE_CONFIG_CONTENT JSON injecting the Ollama provider. */
   private async buildConfigContent(): Promise<string> {
     // Read fresh so context-size changes apply on the next restart.
@@ -276,13 +307,47 @@ export class OpencodeServerManager {
     return JSON.stringify(config);
   }
 
-  /** Find the opencode binary: setting -> known install path -> PATH. */
-  private async resolveBinary(): Promise<string | null> {
-    if (this.cfg.opencodePath && fs.existsSync(this.cfg.opencodePath)) {
-      return this.cfg.opencodePath;
+  /** Absolute path to the binary bundled inside the VSIX (if present). */
+  private bundledBinary(): string | null {
+    const exe = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
+    const p = path.join(this.extensionPath, 'bin', exe);
+    return fs.existsSync(p) ? p : null;
+  }
+
+  /**
+   * On macOS, a binary delivered inside a Marketplace VSIX can carry the
+   * `com.apple.quarantine` attribute, which makes Gatekeeper kill it on exec
+   * ("cannot be opened because the developer cannot be verified"). Strip it,
+   * but only from our own bundled binary — never touch a user-provided one.
+   * Best-effort and idempotent: ignore failures (e.g. xattr missing, already
+   * clean, SIP edge cases) so this never blocks startup.
+   */
+  private async prepareBundledBinary(bin: string): Promise<void> {
+    if (process.platform !== 'darwin') {
+      return;
     }
+    if (bin !== this.bundledBinary()) {
+      return; // user-provided binary: leave it untouched
+    }
+    await new Promise<void>((resolve) => {
+      const child = spawn('xattr', ['-d', 'com.apple.quarantine', bin]);
+      child.on('error', () => resolve()); // xattr absent / unexpected — ignore
+      child.on('close', () => resolve()); // non-zero just means "nothing to remove"
+    });
+  }
+
+  /**
+   * Find the opencode binary, in precedence order:
+   *   1. `ollamaCode.opencodePath` setting (explicit user override)
+   *   2. a user's own install (~/.opencode, Homebrew, PATH) — lets power users
+   *      run a newer/custom build than the one we ship
+   *   3. the binary bundled in the VSIX (the guaranteed offline default)
+   * Returns null only if every option fails (corrupt install / bad override).
+   * (Precedence itself lives in the pure `resolveBinaryPath` for testability.)
+   */
+  private async resolveBinary(): Promise<string | null> {
     const home = os.homedir();
-    const candidates =
+    const userCandidates =
       process.platform === 'win32'
         ? [path.join(home, '.opencode', 'bin', 'opencode.exe')]
         : [
@@ -290,11 +355,17 @@ export class OpencodeServerManager {
             '/opt/homebrew/bin/opencode',
             '/usr/local/bin/opencode',
           ];
-    for (const c of candidates) {
-      if (fs.existsSync(c)) {
-        return c;
-      }
-    }
+    return resolveBinaryPath({
+      overridePath: this.cfg.opencodePath,
+      userCandidates,
+      onPath: await this.whichOpencode(),
+      bundled: this.bundledBinary(),
+      exists: (p) => fs.existsSync(p),
+    });
+  }
+
+  /** Resolve `opencode` from PATH via which/where, or null if absent. */
+  private whichOpencode(): Promise<string | null> {
     return new Promise<string | null>((resolve) => {
       const which = process.platform === 'win32' ? 'where' : 'which';
       const child = spawn(which, ['opencode']);

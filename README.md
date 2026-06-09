@@ -29,7 +29,8 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 
 - **VS Code** 1.104+
 - **[Ollama](https://ollama.com)** installed and running (default `http://127.0.0.1:11434`) with at least one model pulled — e.g. `ollama pull llama3.2` (use a tool-capable model for the agent)
-- **[OpenCode](https://opencode.ai)** installed (`brew install sst/tap/opencode` or `npm i -g opencode-ai`). Auto-detected from `PATH` or `~/.opencode/bin/opencode`.
+
+> **[OpenCode](https://opencode.ai) is bundled** — the matching platform binary ships inside the extension, so there's nothing extra to install and it works offline. Power users can point at their own build with `ollamaCode.opencodePath`; an install on your `PATH` or in `~/.opencode/bin` is preferred over the bundled copy if present.
 
 ## Quick start
 
@@ -43,7 +44,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 | Setting | Default | Description |
 | --- | --- | --- |
 | `ollamaCode.ollamaBaseUrl` | `http://127.0.0.1:11434` | Ollama server host (root, no `/v1`) |
-| `ollamaCode.opencodePath` | _(auto)_ | Path to the `opencode` binary |
+| `ollamaCode.opencodePath` | _(bundled)_ | Override path to an `opencode` binary; empty uses your own install (PATH / `~/.opencode`) or the bundled one |
 | `ollamaCode.serverPort` | `0` | Embedded server port (0 = auto) |
 | `ollamaCode.defaultModel` | _(first)_ | Default model id (e.g. `llama3.2:3b`) |
 | `ollamaCode.agent` | `build` | `build` (can edit) or `plan` (read-only) |
@@ -76,10 +77,16 @@ to your workspace or global config.** The active server is passed through
 
 ```bash
 npm install
-npm run compile        # type-check + bundle (extension + webview)
+npm run bundle:opencode      # fetch the pinned OpenCode binary into bin/ for your platform
+npm run compile              # type-check + bundle (extension + webview)
 # then press F5 in VS Code to launch the Extension Development Host
-npm run package:vsix   # build a .vsix
+npm run package:vsix:bundled # build a platform .vsix with the binary embedded
 ```
+
+The OpenCode binary is fetched at build time (pinned by `opencodeVersion` in
+`package.json`) and is never committed — `bin/` is git-ignored. Bump that field
+to upgrade the bundled OpenCode. F5 also resolves the binary from `bin/`, so run
+`bundle:opencode` once before launching the dev host.
 
 ## License
 

@@ -18,7 +18,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const servers = new ServerRegistry(context, cfg.ollamaBaseUrl);
   const ollama = new OllamaClient(servers.active().url);
   const prefs = new Prefs(context);
-  server = new OpencodeServerManager(cfg, ollama, prefs);
+  // Bundled binary lives under the extension dir; the managed server's on-disk
+  // state is sandboxed under globalStorage so it never collides with a user's
+  // own OpenCode install.
+  const dataDir = vscode.Uri.joinPath(context.globalStorageUri, 'opencode').fsPath;
+  server = new OpencodeServerManager(cfg, ollama, prefs, context.extensionPath, dataDir);
 
   const deps: BridgeDeps = { context, server, ollama, servers, prefs };
 
