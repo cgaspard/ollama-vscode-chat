@@ -1,0 +1,9 @@
+version: 0.3.1
+date: 2026-06-09
+highlights:
+  - New extension icon — the llama mascot is now a filled purple-gradient design, matching the rest of the local-model extension family.
+added: []
+removed: []
+changed:
+  - Marketplace/extension icon redesigned (filled purple-gradient llama with dark facial detail and a soft glow) in place of the previous white outline.
+fixed: []
