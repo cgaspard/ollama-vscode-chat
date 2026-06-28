@@ -4,7 +4,7 @@
 import * as assert from 'node:assert';
 import * as helpers from './helpers';
 
-const { openPanel, post, text, count, classes, click, attr, waitFor } = helpers;
+const { openPanel, post, text, count, classes, click, waitFor } = helpers;
 
 const MODELS = [
   { id: 'qwen3:27b', name: 'qwen3:27b', loaded: false, maxContextLength: 262144, publisher: 'qwen3', format: 'GGUF', quantization: 'Q8_0' },
@@ -67,27 +67,9 @@ describe('v0.5.2 webview features', function () {
       assert.match(firstIdent!, /GGUF/, 'identity line should include the format');
     });
 
-    it('Load selects the model as active', async () => {
-      const ok = await click('.model-row .model-action.load');
-      assert.ok(ok, 'a load button should be clickable');
-      await waitFor('.model-action.busy', (n) => n >= 1);
-      const busyText = await text('.model-action.busy');
-      assert.match(busyText!, /Loading/, 'the clicked action shows a loading spinner');
-    });
-
-    it('Load button is not a disabled element (so its spinner can animate)', async () => {
-      const disabled = await attr('.model-action.busy', 'disabled');
-      assert.strictEqual(disabled, null, 'busy action must not carry the disabled attribute');
-      const ariaBusy = await attr('.model-action.busy', 'aria-busy');
-      assert.strictEqual(ariaBusy, 'true', 'busy action should mark aria-busy=true');
-    });
-
-    it('closes the menu once the load returns', async () => {
-      const openBefore = await count('#model-menu:not(.hidden)');
-      assert.strictEqual(openBefore, 1, 'menu should be open during load');
-      await post({ type: 'models', models: MODELS.map((m, i) => ({ ...m, loaded: i === 0 })), currentModel: 'qwen3:27b' });
-      await waitFor('#model-menu:not(.hidden)', (n) => n === 0);
-      assert.strictEqual(await count('#model-menu:not(.hidden)'), 0, 'menu should close after load returns');
-    });
+    // NOTE: the full Load lifecycle (spinner, completion, cancel, ps behavior)
+    // is exercised against a fake Ollama server in fakeOllama.itest.ts — that
+    // drives the real bridge→client→fetch path with realistic API timing, which
+    // is more meaningful than injecting a synthetic `models` message here.
   });
 });

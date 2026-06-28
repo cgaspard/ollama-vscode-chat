@@ -1127,7 +1127,8 @@ body {
   font-size: 11px;
   cursor: pointer;
 }
-.model-action.load {
+.model-action.load,
+.model-action.reload {
   background: var(--accent);
   color: var(--accent-fg);
   border-color: transparent;
@@ -1135,6 +1136,22 @@ body {
 .model-action.eject:hover {
   border-color: var(--vscode-errorForeground, #e35d6a);
   color: var(--vscode-errorForeground, #e35d6a);
+}
+/* while loading, the action becomes a cancel control — the ✕ reveals intent */
+.model-action.busy .cancel-x {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+.model-action.busy:hover .cancel-x {
+  opacity: 1;
+  color: var(--vscode-errorForeground, #e35d6a);
+}
+/* reassurance under a model that's mid-load (large models take minutes) */
+.model-load-hint {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
+  margin-top: 2px;
 }
 .model-action.busy {
   opacity: 0.85;

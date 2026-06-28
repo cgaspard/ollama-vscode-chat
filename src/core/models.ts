@@ -9,22 +9,42 @@ export interface SelectableModel {
 }
 
 /**
- * Pick the model to use: the first preference that exists, else a currently
- * loaded model, else the first available. Returns undefined when there are no
- * models. Empty / null preferences are skipped so callers can pass
- * `[defaultModel, stored, current]` without pre-filtering.
+ * Pick the model to use, in priority order:
+ *   1. an explicit configured default (`defaultModel`), if it exists — honor
+ *      the user's deliberate choice above all;
+ *   2. a currently-LOADED/resident model — if something is already loaded, open
+ *      straight into it (ready to chat) rather than a stale last-used pick that
+ *      isn't loaded;
+ *   3. the next existing preference (stored / last-used / current);
+ *   4. the first available model.
+ * Returns undefined when there are no models. Empty/null preferences are
+ * skipped, so callers can pass `[defaultModel, stored, current]` unfiltered;
+ * `preferences[0]` is treated as the explicit default.
  */
 export function pickModel<T extends SelectableModel>(
   preferences: Array<string | null | undefined>,
   models: T[],
 ): string | undefined {
-  for (const pref of preferences) {
-    if (pref && models.some((m) => m.id === pref)) {
-      return pref;
+  const exists = (id: string | null | undefined): boolean => !!id && models.some((m) => m.id === id);
+
+  // 1. explicit configured default
+  const explicitDefault = preferences[0];
+  if (exists(explicitDefault)) {
+    return explicitDefault as string;
+  }
+  // 2. a currently-loaded model beats a non-loaded stored/last-used pick
+  const loaded = models.find((m) => m.loaded);
+  if (loaded) {
+    return loaded.id;
+  }
+  // 3. the next existing preference (stored / current)
+  for (const pref of preferences.slice(1)) {
+    if (exists(pref)) {
+      return pref as string;
     }
   }
-  const loaded = models.find((m) => m.loaded);
-  return loaded?.id ?? models[0]?.id;
+  // 4. first available
+  return models[0]?.id;
 }
 
 export interface NamedModel {
@@ -85,4 +105,65 @@ export function modelIdentity(parts: {
   return [parts.publisher, parts.format, parts.quantization, parts.date]
     .filter(Boolean)
     .join(' · ');
+}
+
+// ---------------------------------------------------------------------------
+// Load-state logic (pure) — shared by the webview and unit tests.
+//
+// Ollama load-state comes from /api/ps, which can fail/time out while the
+// server is busy loading a big model. A failed ps must read as "unknown"
+// (loaded === undefined), NOT "unloaded" (false) — otherwise a transient miss
+// flips a resident model to not-loaded and breaks the Send gate.
+// ---------------------------------------------------------------------------
+
+export interface LoadStateModel {
+  id: string;
+  /** true = resident, false = definitely not loaded, undefined = unknown. */
+  loaded?: boolean;
+}
+
+/**
+ * Merge an incoming model list with the previous one, preserving the previously
+ * known `loaded` value whenever the incoming value is undefined ("unknown").
+ * A definite true/false in the incoming list always wins.
+ */
+export function mergeModelLoadedState<T extends LoadStateModel>(prev: T[], incoming: T[]): T[] {
+  const before = new Map(prev.map((m) => [m.id, m.loaded]));
+  return incoming.map((m) =>
+    m.loaded === undefined ? { ...m, loaded: before.get(m.id) } : m,
+  );
+}
+
+/**
+ * Is the selected model ready to receive a prompt? Only when it exists, is
+ * definitely loaded (true — not unknown), and isn't mid-load. `loadingIds` are
+ * models with a load in flight.
+ */
+export function isModelReady(
+  currentModel: string | null,
+  models: LoadStateModel[],
+  loadingIds: ReadonlySet<string>,
+): boolean {
+  if (!currentModel) {
+    return false;
+  }
+  const m = models.find((x) => x.id === currentModel);
+  return !!m && m.loaded === true && !loadingIds.has(currentModel);
+}
+
+/**
+ * Elapsed-time label for an in-flight load: "" under 1s, "18s" under a minute,
+ * "2:47" beyond — so a multi-minute load reads naturally.
+ */
+export function formatLoadElapsed(seconds: number): string {
+  const s = Math.floor(seconds);
+  if (!(s > 0)) {
+    return '';
+  }
+  if (s < 60) {
+    return `${s}s`;
+  }
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, '0')}`;
 }

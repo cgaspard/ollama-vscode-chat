@@ -57,17 +57,24 @@ export class OllamaClient {
       return [];
     }
 
-    // Loaded models + their loaded context length.
+    // Loaded models + their loaded context length. Track whether /api/ps
+    // actually answered: if it fails/times out (which can happen while a big
+    // model is loading and the server is busy), we must NOT conclude that every
+    // model is unloaded — that false negative flips the UI's loaded-state and
+    // breaks the Send gate. On failure `psOk` stays false → state is reported as
+    // undefined ("unknown") so the UI preserves its prior belief.
     const loaded = new Map<string, number>();
+    let psOk = false;
     try {
       const res = await fetch(`${this.rest}/api/ps`, { signal: TIMEOUT(5000) });
       if (res.ok) {
+        psOk = true;
         for (const m of ((await res.json()) as { models?: any[] }).models ?? []) {
           loaded.set(m.name ?? m.model, m.context_length ?? 0);
         }
       }
     } catch {
-      // /api/ps optional
+      // /api/ps unavailable — leave psOk false (loaded-state unknown this round).
     }
 
     // Per-model capabilities + max context via /api/show (parallel).
@@ -88,7 +95,9 @@ export class OllamaClient {
         id: m.name,
         displayName: prettyName(m.name),
         type: caps.includes('vision') ? 'vlm' : 'llm',
-        state: loaded.has(m.name) ? 'loaded' : 'not-loaded',
+        // undefined = unknown (ps didn't answer this round); only assert
+        // 'not-loaded' when ps actually succeeded and omitted the model.
+        state: psOk ? (loaded.has(m.name) ? 'loaded' : 'not-loaded') : undefined,
         loadedContextLength: loaded.get(m.name),
         maxContextLength: maxCtx,
         toolUse: caps.includes('tools'),
@@ -123,9 +132,14 @@ export class OllamaClient {
   }
 
   /**
-   * Ensure `modelId` is loaded with at least `minContext` tokens of context.
-   * Ollama loads a model instance with the `num_ctx` from the request, so we
-   * (re)load via /api/generate when the loaded context is too small. Never throws.
+   * Ensure `modelId` is loaded before a prompt — but DO NOT change the context
+   * of a model that's already loaded. Reloading a resident model just to grow
+   * its num_ctx is disruptive (a 20s+ reload that drops the turn, and a much
+   * larger VRAM footprint that can evict other models) and surprising — it fired
+   * merely from the user typing. So: if the model is already loaded, leave it
+   * exactly as-is. Only load (at the target context) when it isn't loaded at all.
+   * Changing an already-loaded model's context is an explicit action offered in
+   * the load dialog, never an automatic side effect of sending. Never throws.
    */
   async ensureContext(
     modelId: string,
@@ -138,11 +152,11 @@ export class OllamaClient {
       if (!model) {
         return { reloaded: false, note: 'model not found in Ollama' };
       }
-      const target = Math.min(minContext, model.maxContextLength ?? minContext);
-      const ctx = model.loadedContextLength ?? 0;
-      if (model.state === 'loaded' && ctx >= target) {
-        return { reloaded: false, context: ctx };
+      // Already loaded → respect its current context; do not reload.
+      if (model.state === 'loaded') {
+        return { reloaded: false, context: model.loadedContextLength };
       }
+      const target = Math.min(minContext, model.maxContextLength ?? minContext);
       onProgress?.(`Loading ${model.displayName} with ${target.toLocaleString()} context…`);
       const loaded = await this.loadModel(modelId, target, keepAlive);
       return { reloaded: true, context: loaded.contextLength ?? target };
@@ -152,7 +166,16 @@ export class OllamaClient {
     }
   }
 
-  /** Load (or warm) a model with a context window via /api/generate. */
+  /**
+   * Load a model and confirm it can actually serve, via a tiny real generation.
+   *
+   * We deliberately send a 1-token prompt rather than a bare warm call (empty
+   * prompt → done_reason:"load"): measured against a real server, the bare warm
+   * call can return "done" while the model is NOT yet serveable (a real request
+   * right after hung for 30s+). A prompt that returns an actual token is positive
+   * proof the model is loaded AND the generation path is warm — so when this
+   * resolves, the model is genuinely ready. Costs one throwaway token.
+   */
   async loadModel(
     modelId: string,
     contextLength: number,
@@ -163,8 +186,10 @@ export class OllamaClient {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model: modelId,
+        prompt: 'hi',
+        stream: false,
         keep_alive: coerceKeepAlive(keepAlive),
-        options: { num_ctx: contextLength },
+        options: { num_ctx: contextLength, num_predict: 1 },
       }),
       signal: TIMEOUT(600000),
     });

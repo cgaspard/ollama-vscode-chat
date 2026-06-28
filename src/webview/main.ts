@@ -8,7 +8,14 @@ import {
   shouldSuppressMessage,
 } from '../core/compaction';
 import { computeWindow, contextPresets, formatTokens } from '../core/context';
-import { formatModelDate, modelDisambiguator, modelIdentity } from '../core/models';
+import {
+  formatLoadElapsed,
+  formatModelDate,
+  isModelReady,
+  mergeModelLoadedState,
+  modelDisambiguator,
+  modelIdentity,
+} from '../core/models';
 import { isTodoCardCollapsed, summarizeTodos, Todo } from '../core/todos';
 import { buildAnswers, isEmptyAnswer, parseQuestionBlob, QInfo } from '../core/question';
 import type { MessageWithParts, OpencodeEvent, Part } from '../opencode/protocol';
@@ -814,16 +821,31 @@ function renderModels(): void {
   }
 }
 
-/** Is the selected model confirmed loaded (resident) and ready to receive a prompt? */
-function selectedModelReady(): boolean {
-  const m = state.models.find((x) => x.id === state.currentModel);
-  return !!m && m.loaded && !state.loadingModels.has(m.id);
+/**
+ * Merge an incoming model list with the current one, preserving the known
+ * loaded-state when the refresh reports it as undefined ("unknown" — e.g.
+ * /api/ps didn't answer this round). Without this, a transient ps failure
+ * during a keep-warm refresh would flip a resident model to "not loaded" and
+ * desync the Send gate / model pill. A definite true/false always wins.
+ */
+function mergeModels(incoming: UiModel[]): UiModel[] {
+  return mergeModelLoadedState(state.models, incoming);
 }
 
-/** Begin tracking a model load: record its start time and start the tick timer. */
-function beginModelLoad(modelID: string): void {
+/** Is the selected model confirmed loaded (resident) and ready to receive a prompt? */
+function selectedModelReady(): boolean {
+  return isModelReady(state.currentModel, state.models, state.loadingModels);
+}
+
+// Whether each in-flight op is a load or an eject, so the row shows the right
+// verb ("Loading…" vs "Ejecting…").
+const loadModeById = new Map<string, 'load' | 'eject'>();
+
+/** Begin tracking a load/eject: record its start time and start the tick timer. */
+function beginModelLoad(modelID: string, mode: 'load' | 'eject' = 'load'): void {
   state.loadingModels.add(modelID);
   state.loadStartedAt.set(modelID, Date.now());
+  loadModeById.set(modelID, mode);
   ensureModelLoadTimer();
 }
 
@@ -838,6 +860,7 @@ function reconcileLoadingState(models: UiModel[]): void {
     if (!m || m.loaded) {
       state.loadingModels.delete(id);
       state.loadStartedAt.delete(id);
+      loadModeById.delete(id);
     }
   }
   if (!state.loadingModels.size && modelLoadTimer) {
@@ -863,14 +886,14 @@ function ensureModelLoadTimer(): void {
   }, 1000);
 }
 
-/** Elapsed label for a loading model, e.g. " 18s" (empty under 1s). */
+/** Elapsed label for a loading model (leading space), via the pure formatter. */
 function loadElapsedLabel(modelID: string): string {
   const started = state.loadStartedAt.get(modelID);
   if (!started) {
     return '';
   }
-  const s = Math.floor((Date.now() - started) / 1000);
-  return s > 0 ? ` ${s}s` : '';
+  const label = formatLoadElapsed((Date.now() - started) / 1000);
+  return label ? ` ${label}` : '';
 }
 
 function renderModelMenu(): void {
@@ -890,6 +913,12 @@ function renderModelMenu(): void {
     const ctx = m.loaded
       ? `${formatTokens(m.contextLength || 0)} / ${formatTokens(m.maxContextLength || 0)}`
       : `max ${formatTokens(m.maxContextLength || 0)}`;
+    // A loaded model whose chosen context (numCtx) differs from what it's
+    // actually loaded at (contextLength) → the action becomes "Reload" (apply
+    // the new context via eject+load). We never change a loaded model's context
+    // automatically; this is the explicit affordance for it.
+    const reloadPending =
+      !!m.loaded && !!m.contextLength && !!m.numCtx && m.numCtx !== m.contextLength;
     // Identity line: publisher (family) / format / quant / pull date — the
     // fields that tell apart same-named models. Only shown when present.
     const ident = modelIdentity({ ...m, date: formatModelDate(m.created) });
@@ -907,9 +936,33 @@ function renderModelMenu(): void {
         ${ident ? `<span class="model-ident">${escapeHtml(ident)}</span>` : ''}
         <span class="model-meta">${m.loaded ? 'loaded · ' : ''}${ctx}${caps ? ' · <span class="model-caps">' + caps + '</span>' : ''}</span>
       </span>
-      <button class="model-action ${loading ? 'busy' : m.loaded ? 'eject' : 'load'}" aria-busy="${loading}">
-        ${loading ? `${icon.spinner}<span>${m.loaded ? 'Ejecting…' : 'Loading…' + loadElapsedLabel(m.id)}</span>` : m.loaded ? 'Eject' : 'Load'}
+      <button class="model-action ${loading ? 'busy' : reloadPending ? 'reload' : m.loaded ? 'eject' : 'load'}" aria-busy="${loading}" title="${
+        loading && loadModeById.get(m.id) !== 'eject'
+          ? 'Cancel loading'
+          : reloadPending
+            ? `Reload at ${formatTokens(m.numCtx || 0)} context`
+            : ''
+      }">
+        ${
+          loading
+            ? loadModeById.get(m.id) === 'eject'
+              ? `${icon.spinner}<span>Ejecting…${loadElapsedLabel(m.id)}</span>`
+              : `${icon.spinner}<span>Loading…${loadElapsedLabel(m.id)}</span><span class="cancel-x">✕</span>`
+            : reloadPending
+              ? 'Reload'
+              : m.loaded
+                ? 'Eject'
+                : 'Load'
+        }
       </button>`;
+    // While LOADING (not ejecting), show a reassurance line so a multi-minute
+    // load doesn't look hung.
+    if (loading && loadModeById.get(m.id) !== 'eject') {
+      const hint = document.createElement('div');
+      hint.className = 'model-load-hint';
+      hint.textContent = 'Large models can take a few minutes to load — you can keep typing.';
+      (row.querySelector('.model-info') as HTMLElement).appendChild(hint);
+    }
     // Row click selects the model as active.
     row.addEventListener('click', () => {
       state.currentModel = m.id;
@@ -919,12 +972,34 @@ function renderModelMenu(): void {
       syncSendEnabled(); // a newly-selected model may not be loaded → gate Send
       closeModelMenu();
     });
-    // Action button loads / ejects. Loading also makes the model active (you
-    // loaded it to use it); ejecting leaves the current selection alone.
+    // Action button: while loading it CANCELS; otherwise it loads / ejects.
     const action = row.querySelector('.model-action') as HTMLButtonElement;
     action.addEventListener('click', (e) => {
       e.stopPropagation();
       if (loading) {
+        // An eject can't be cancelled mid-flight; ignore clicks on it.
+        if (loadModeById.get(m.id) === 'eject') {
+          return;
+        }
+        // Cancel the in-flight load and release local state.
+        post({ type: 'cancelLoad', modelID: m.id });
+        state.loadingModels.delete(m.id);
+        state.loadStartedAt.delete(m.id);
+        loadModeById.delete(m.id);
+        renderModelMenu();
+        syncSendEnabled();
+        return;
+      }
+      // Reload: model is loaded but the chosen context differs → apply it by
+      // reloading at the new context (persist the choice, then load).
+      if (reloadPending) {
+        state.currentModel = m.id;
+        post({ type: 'selectModel', modelID: m.id });
+        post({ type: 'setModelCtx', modelID: m.id, numCtx: m.numCtx as number });
+        beginModelLoad(m.id, 'load');
+        post({ type: 'reloadModel', modelID: m.id });
+        renderModelMenu();
+        syncSendEnabled();
         return;
       }
       if (!m.loaded) {
@@ -933,7 +1008,7 @@ function renderModelMenu(): void {
         renderMeter();
         closeMenuOnLoad = true; // dismiss the menu once this load completes
       }
-      beginModelLoad(m.id);
+      beginModelLoad(m.id, m.loaded ? 'eject' : 'load');
       post({ type: m.loaded ? 'unloadModel' : 'loadModel', modelID: m.id });
       renderModelMenu();
       syncSendEnabled();
@@ -965,23 +1040,31 @@ function renderCtxPresets(): void {
     const b = document.createElement('button');
     b.className = 'ctx-preset' + (v === current ? ' active' : '');
     b.textContent = formatTokens(v);
-    b.title = `Load ${m.name} with a ${v.toLocaleString()}-token context window`;
+    b.title = m.loaded
+      ? `Set context to ${v.toLocaleString()} — press Reload to apply`
+      : `Load ${m.name} with a ${v.toLocaleString()}-token context window`;
     b.addEventListener('click', (e) => {
       e.stopPropagation();
       if (v === current || !state.currentModel) {
         return;
       }
+      // Just record the desired context. We do NOT reload a loaded model here —
+      // changing the chip turns its action button into "Reload" (apply on
+      // click). For a not-loaded model it's simply the context the next Load
+      // will use. Persist the choice so it sticks (no server rebuild now).
       m.numCtx = v; // optimistic
-      renderCtxPresets();
+      post({ type: 'setModelCtxPref', modelID: state.currentModel, numCtx: v });
+      renderModelMenu(); // re-render so the Reload affordance appears
       renderMeter();
-      post({ type: 'setModelCtx', modelID: state.currentModel, numCtx: v });
     });
     el.appendChild(b);
   }
 }
 
+// No "Off"/0 option: keep_alive:0 unloads the model immediately after each call,
+// which in an interactive chat tool just makes a model you loaded vanish. The
+// minimum is 5m (the host also clamps any value to ≥5m defensively).
 const KEEP_ALIVE_PRESETS: { label: string; value: string }[] = [
-  { label: 'Off', value: '0' },
   { label: '5m', value: '5m' },
   { label: '30m', value: '30m' },
   { label: '1h', value: '1h' },
@@ -2228,7 +2311,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'init':
-      state.models = msg.models;
+      state.models = mergeModels(msg.models);
       state.currentModel = msg.currentModel;
       state.agent = msg.agent;
       state.serverReady = msg.serverReady;
@@ -2250,7 +2333,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       renderServers();
       break;
     case 'models':
-      state.models = msg.models;
+      state.models = mergeModels(msg.models); // preserve known loaded-state on an "unknown" refresh
       state.currentModel = msg.currentModel;
       // Clear loading state ONLY for models that have settled — a model is done
       // when it's now loaded (or gone from the list). Crucially we do NOT wipe
@@ -2267,12 +2350,33 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
         closeModelMenu();
       }
       break;
+    case 'loadProgress':
+      // Host-driven progress for a (possibly multi-minute) load. Ensure the
+      // model is tracked as loading and keep the elapsed display ticking.
+      if (!state.loadingModels.has(msg.modelID)) {
+        state.loadingModels.add(msg.modelID);
+        state.loadStartedAt.set(msg.modelID, Date.now() - msg.elapsedSec * 1000);
+        ensureModelLoadTimer();
+      }
+      if (!modelMenu.classList.contains('hidden')) {
+        renderModelMenu();
+      }
+      syncSendEnabled();
+      break;
     case 'loadSettled':
-      // A load/eject finished (success OR failure) — stop this model's spinner.
-      // Reconcile alone can't clear a FAILED load (the model is neither loaded
-      // nor gone), so this is the authoritative release signal.
+      // A load/eject finished — stop this model's spinner.
       state.loadingModels.delete(msg.modelID);
       state.loadStartedAt.delete(msg.modelID);
+      loadModeById.delete(msg.modelID);
+      // A SUCCESSFUL operation is authoritative about the model's new state:
+      // a load → it's now resident; an eject → it's now unloaded. Apply it
+      // directly rather than waiting for /api/ps (which lags on both edges).
+      if (!msg.error) {
+        const m = state.models.find((x) => x.id === msg.modelID);
+        if (m) {
+          m.loaded = msg.mode === 'load';
+        }
+      }
       reconcileLoadingState(state.models); // tidy the timer if nothing's left
       renderModels();
       syncSendEnabled();

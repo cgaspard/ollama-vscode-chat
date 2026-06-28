@@ -4,7 +4,7 @@ import type { MessageWithParts, OpencodeEvent, PermissionResponse } from './open
 export interface UiModel {
   id: string;
   name: string;
-  loaded: boolean;
+  loaded?: boolean; // true=resident, false=not loaded, undefined=unknown (ps didn't answer)
   contextLength?: number; // actually-loaded num_ctx (from /api/ps)
   maxContextLength?: number;
   numCtx?: number; // effective configured num_ctx (override or global default, clamped to max)
@@ -50,8 +50,13 @@ export type HostToWebview =
   | { type: 'busy'; busy: boolean }
   // A load/eject for `modelID` has settled (succeeded or failed) — the webview
   // stops its per-model spinner regardless of outcome. `error` is set when the
-  // operation failed (e.g. the model's files are incomplete on the server).
-  | { type: 'loadSettled'; modelID: string; error?: string }
+  // operation failed. `mode` says whether it was a load (success ⇒ model is now
+  // loaded) or an eject (success ⇒ model is now unloaded).
+  | { type: 'loadSettled'; modelID: string; mode: 'load' | 'eject'; error?: string }
+  // Periodic progress for an in-flight (possibly multi-minute) load or eject:
+  // elapsed seconds + a note. Lets the UI show "Loading… 2:47" / "Ejecting…"
+  // with a live timer instead of looking hung.
+  | { type: 'loadProgress'; modelID: string; elapsedSec: number; note?: string; mode: 'load' | 'eject' }
   // A /compact run is in flight (block input) or has finished (with the summary
   // text, if OpenCode produced one). `summary` is only set when active === false.
   | { type: 'compacting'; active: boolean; summary?: string }
@@ -72,8 +77,11 @@ export type WebviewToHost =
   | { type: 'send'; text: string; thinking: boolean; images?: UiImage[]; includeActiveFile?: boolean }
   | { type: 'selectModel'; modelID: string }
   | { type: 'loadModel'; modelID: string }
+  | { type: 'reloadModel'; modelID: string } // eject + load at the model's chosen context
+  | { type: 'cancelLoad'; modelID: string }
   | { type: 'unloadModel'; modelID: string }
-  | { type: 'setModelCtx'; modelID: string; numCtx: number }
+  | { type: 'setModelCtx'; modelID: string; numCtx: number } // persist + rebuild OpenCode budget
+  | { type: 'setModelCtxPref'; modelID: string; numCtx: number } // persist desired ctx only (no reload/rebuild)
   | { type: 'setKeepAlive'; value: string }
   | { type: 'refreshModels' }
   | { type: 'listServers' }

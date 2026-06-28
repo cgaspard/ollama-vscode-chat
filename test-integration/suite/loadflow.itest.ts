@@ -61,6 +61,41 @@ describe('Send gating + Load CTA', function () {
     assert.strictEqual(await attr('.send-btn', 'title'), 'Send', 'button title is Send when ready');
   });
 
+  it('does NOT drop to a CTA when a refresh reports loaded-state as unknown', async () => {
+    // Regression: a keep-warm refresh during a busy server can report loaded as
+    // undefined (e.g. /api/ps didn't answer). The gate must keep its prior belief
+    // (loaded) rather than falsely flipping to the "Load a model" CTA.
+    await post({ type: 'models', models: MODELS.map((m) => ({ ...m, loaded: m.id === 'qwen3:27b' })), currentModel: 'qwen3:27b' });
+    await waitFor('.send-btn.cta', (n) => n === 0);
+    // Now an "unknown" refresh (loaded omitted/undefined for the resident model).
+    await post({ type: 'models', models: MODELS.map((m) => ({ ...m, loaded: undefined })), currentModel: 'qwen3:27b' });
+    // Give the UI a beat, then assert it did NOT become a CTA.
+    await new Promise((r) => setTimeout(r, 300));
+    assert.strictEqual(await count('.send-btn.cta'), 0, 'unknown refresh must not flip a loaded model to CTA');
+    // A DEFINITE not-loaded (real eviction) still gates.
+    await post({ type: 'models', models: MODELS.map((m) => ({ ...m, loaded: false })), currentModel: 'qwen3:27b' });
+    await waitFor('.send-btn.cta', (n) => n === 1);
+    assert.strictEqual(await count('.send-btn.cta'), 1, 'a definite not-loaded still gates Send');
+  });
+
+  it('shows progress + a cancel control during a long load', async () => {
+    await post({ type: 'init', models: MODELS, currentModel: 'qwen3:27b', agent: 'build', cwd: '/tmp', serverReady: true, ollamaConnected: true, minContext: 32768, keepAlive: '30m' });
+    await click('#model-btn');
+    await waitFor('.model-row', (n) => n >= 2);
+    await click('.model-row .model-action.load');
+    // Host streams progress for an in-flight (minutes-long) load.
+    await post({ type: 'loadProgress', modelID: 'qwen3:27b', elapsedSec: 95, note: 'Large models can take a few minutes to load.' });
+    await waitFor('.model-action.busy', (n) => n >= 1);
+    // The busy action must expose a cancel affordance and stay non-disabled.
+    assert.ok((await count('.cancel-x')) >= 1, 'a cancel ✕ should be shown while loading');
+    assert.strictEqual(await attr('.model-action.busy', 'disabled'), null, 'loading action must remain clickable to cancel');
+    assert.ok((await count('.model-load-hint')) >= 1, 'a reassurance hint should be shown');
+    // Cancelling clears the spinner.
+    await click('.model-action.busy');
+    await waitFor('.model-action.busy', (n) => n === 0);
+    assert.strictEqual(await count('.model-action.busy'), 0, 'cancel clears the loading state');
+  });
+
   it('re-gates to a CTA if the selected model is switched to an unloaded one', async () => {
     // qwen is loaded; switch selection to the unloaded llama via its row.
     await click('#model-btn');
@@ -69,6 +104,26 @@ describe('Send gating + Load CTA', function () {
     await helpers.post({ type: 'models', models: MODELS.map((m) => ({ ...m, loaded: m.id === 'qwen3:27b' })), currentModel: 'llama3.3:70b' });
     await waitFor('.send-btn.cta', (n) => n === 1);
     assert.strictEqual(await count('.send-btn.cta'), 1, 'selecting an unloaded model re-gates Send');
+  });
+
+  it('a loaded model whose context is changed shows a Reload action (not auto-applied)', async () => {
+    // A model loaded at 32K (contextLength) and selected.
+    await helpers.post({
+      type: 'models',
+      models: [{ id: 'qwen3:27b', name: 'qwen3:27b', loaded: true, contextLength: 32768, maxContextLength: 262144, numCtx: 32768 }],
+      currentModel: 'qwen3:27b',
+    });
+    await click('#model-btn');
+    await waitFor('.model-row', (n) => n >= 1);
+    // Initially the loaded model shows Eject, no Reload.
+    assert.strictEqual(await count('.model-action.reload'), 0, 'no Reload while ctx matches what is loaded');
+    assert.strictEqual(await count('.model-action.eject'), 1, 'loaded model shows Eject');
+    // Pick a DIFFERENT context chip (a ctx-preset that isn't the active 32K).
+    await click('.ctx-preset:not(.active)');
+    // The action becomes Reload — the change is offered, NOT auto-applied.
+    await waitFor('.model-action.reload', (n) => n === 1);
+    assert.strictEqual(await count('.model-action.reload'), 1, 'changing ctx offers Reload');
+    assert.strictEqual(await count('.model-action.eject'), 0, 'Eject is replaced by Reload');
   });
 });
 

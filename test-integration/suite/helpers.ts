@@ -11,6 +11,11 @@ export async function openPanel(): Promise<void> {
   await sleep(800); // let the webview script load and install its test hook
 }
 
+/** Point discovery + load at a (fake) Ollama server URL before opening a panel. */
+export async function useServer(url: string): Promise<void> {
+  await vscode.commands.executeCommand('ollamaCode._test.useServer', url);
+}
+
 /** Inject a host->webview message (drives the fake event stream). */
 export async function post(msg: HostToWebview | Record<string, unknown>): Promise<void> {
   await vscode.commands.executeCommand('ollamaCode._test.post', msg);

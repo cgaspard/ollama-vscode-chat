@@ -112,6 +112,15 @@ export function activate(context: vscode.ExtensionContext): void {
         const panel = openChatPanel(context.extensionUri, deps);
         attachTestWebview(panel.webview);
       }),
+      // Point discovery + load at an arbitrary Ollama URL (e.g. a fake server
+      // that replays captured API behavior) so the integration suite can drive
+      // the real bridge→client→fetch load path. Returns once the active server
+      // is switched; open a panel afterwards to init against it.
+      vscode.commands.registerCommand('ollamaCode._test.useServer', async (url: string) => {
+        const s = await servers.add('Test', url);
+        await servers.setActive(s.id);
+        ollama.setBaseUrl(servers.active().url);
+      }),
     );
   }
 }

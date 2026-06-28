@@ -3,7 +3,9 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfig } from '../config';
 import { clampContext } from '../core/context';
+import { clampKeepAlive } from '../core/keepAlive';
 import { humanizeError } from '../core/errors';
+import { pickModel } from '../core/models';
 import { ServerRegistry } from '../connection';
 import { OllamaClient, OllamaModel } from '../ollama/client';
 import { log, logError } from '../logger';
@@ -42,6 +44,10 @@ export class ChatBridge {
   private healthTimer: ReturnType<typeof setInterval> | undefined;
   private healthTicks = 0;
   private titleSink: ((t: string) => void) | undefined;
+  /** Model ids with a load currently in flight → cancel handle. While any load
+   * is in flight the keep-warm refresh is paused (it would contend with the
+   * busy server and can stall the load). */
+  private readonly loadsInFlight = new Map<string, AbortController>();
 
   constructor(
     private readonly webview: vscode.Webview,
@@ -57,6 +63,10 @@ export class ChatBridge {
     this.messageSub?.dispose();
     this.eventAbort?.abort();
     this.editorSub?.dispose();
+    for (const ctrl of this.loadsInFlight.values()) {
+      ctrl.abort(); // stop any readiness-poll loops
+    }
+    this.loadsInFlight.clear();
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
       this.healthTimer = undefined;
@@ -85,7 +95,11 @@ export class ChatBridge {
       if (ok && !this.connected) {
         await this.init(); // came online → full setup + model load
       } else if (ok && this.connected) {
-        if (++this.healthTicks % 3 === 0) {
+        // Pause the model refresh + keep-warm while a load is in flight: the
+        // server is busy loading (possibly for minutes) and an extra listModels
+        // (/api/ps + parallel /api/show) would contend with — and can stall —
+        // the load. The load's own readiness poll drives state meanwhile.
+        if (this.loadsInFlight.size === 0 && ++this.healthTicks % 3 === 0) {
           const list = await this.refreshModelsToWebview().catch(() => [] as OllamaModel[]); // ~every 15s
           await this.keepWarm(list).catch(() => undefined);
         }
@@ -157,11 +171,22 @@ export class ChatBridge {
         case 'loadModel':
           await this.handleLoadModel(msg.modelID);
           break;
+        case 'reloadModel':
+          await this.handleReloadModel(msg.modelID);
+          break;
+        case 'cancelLoad':
+          this.cancelLoad(msg.modelID);
+          break;
         case 'unloadModel':
           await this.handleUnloadModel(msg.modelID);
           break;
         case 'setModelCtx':
           await this.setModelCtx(msg.modelID, msg.numCtx);
+          break;
+        case 'setModelCtxPref':
+          // Persist the desired context only — no reload, no server rebuild.
+          // Applied when the user presses Reload (or on the next explicit load).
+          await this.deps.prefs.setCtx(msg.modelID, msg.numCtx);
           break;
         case 'setKeepAlive':
           await this.setKeepAlive(msg.value);
@@ -392,6 +417,22 @@ export class ChatBridge {
     });
   }
 
+  /**
+   * Proof-of-life: we just received a successful response from the server, so it
+   * is provably online. If the UI is currently showing offline (a stale health
+   * poll, or it never connected), flip it online immediately and trigger a full
+   * init so the offline banner can't linger while data is clearly flowing. A
+   * no-op when already connected, so it's cheap to call from any success path.
+   */
+  private noteOnline(): void {
+    if (this.connected || this.disposed) {
+      return;
+    }
+    this.connected = true;
+    this.postServers(true);
+    void this.init(); // re-establish OpenCode + models now that we know it's up
+  }
+
   /** Switch the active Ollama server: tear down OpenCode and re-initialize. */
   private async switchServer(id: string): Promise<void> {
     await this.deps.servers.setActive(id);
@@ -406,6 +447,11 @@ export class ChatBridge {
 
   private async refreshModelsToWebview(): Promise<OllamaModel[]> {
     const list = await this.deps.ollama.listModels();
+    // A non-empty list is proof the server answered — if we were showing
+    // offline, correct that immediately rather than waiting for the next poll.
+    if (list.length) {
+      this.noteOnline();
+    }
     this.post({ type: 'models', models: this.mapModels(list), currentModel: this.currentModel });
     return list;
   }
@@ -415,14 +461,10 @@ export class ChatBridge {
    * OpenCode's chat requests reset Ollama's keep_alive to its ~5min default, so
    * without this the user's keepAlive choice wouldn't stick. Re-loading with the
    * same num_ctx is a cheap no-op on Ollama's side (no weight reload), it just
-   * refreshes the timer. Skipped when keep_alive is "0" (unload).
+   * refreshes the timer. (keep_alive is always ≥5m now — never 0.)
    */
   private async keepWarm(list: OllamaModel[]): Promise<void> {
     if (!this.currentModel) {
-      return;
-    }
-    const ka = this.keepAlive();
-    if (ka === '0' || ka === '0s') {
       return;
     }
     const m = list.find((x) => x.id === this.currentModel);
@@ -430,7 +472,7 @@ export class ChatBridge {
       return;
     }
     const ctx = m.loadedContextLength || this.ctxFor(m.id, m.maxContextLength);
-    await this.deps.ollama.loadModel(m.id, ctx, ka);
+    await this.deps.ollama.loadModel(m.id, ctx, this.keepAlive());
   }
 
   /** Effective num_ctx for a model: per-model override, else the global default, clamped to the model's max. */
@@ -439,30 +481,140 @@ export class ChatBridge {
     return clampContext(target, maxContextLength);
   }
 
-  /** Effective keep_alive: UI override, else the `ollamaCode.keepAlive` setting. */
+  /**
+   * Effective keep_alive: UI override, else the `ollamaCode.keepAlive` setting,
+   * CLAMPED to a 5-minute minimum. keep_alive:0 ("unload immediately") is a
+   * footgun for an interactive chat tool — it makes a model you just loaded
+   * vanish — so it can never be sent. (A negative value, "forever", is kept.)
+   */
   private keepAlive(): string {
-    return this.deps.prefs.keepAlive() ?? getConfig().keepAlive;
+    return clampKeepAlive(this.deps.prefs.keepAlive() ?? getConfig().keepAlive);
   }
 
+  /**
+   * Load a model. Ollama loads are a single blocking call with NO progress API
+   * and can take MINUTES for a large model. So we don't simply await it: we fire
+   * the load AND poll /api/ps for residency, finishing as soon as either the
+   * load request returns OR the model shows up resident. While in flight the
+   * keep-warm refresh is paused (see startHealthPoll) and the user can cancel.
+   */
   private async handleLoadModel(modelID: string): Promise<void> {
-    const model = await this.deps.ollama.getModel(modelID).catch(() => undefined);
-    this.post({ type: 'status', text: `Loading ${modelID}…` });
-    const result = await this.deps.ollama.ensureContext(
-      modelID,
-      this.ctxFor(modelID, model?.maxContextLength),
-      this.keepAlive(),
-      (m) => this.post({ type: 'status', text: m }),
-    );
-    if (result.note) {
-      this.post({ type: 'status', text: result.note, kind: 'warn' });
+    if (this.loadsInFlight.has(modelID)) {
+      return; // already loading this one
+    }
+    const ctrl = new AbortController();
+    this.loadsInFlight.set(modelID, ctrl);
+
+    // Fire the (blocking, possibly minutes-long) load via the RAW /api/generate
+    // warm call. This call is the AUTHORITATIVE completion signal: Ollama blocks
+    // it until the model is actually loaded, then returns done_reason:"load".
+    // We do NOT gate on /api/ps — measured against a real server, ps stays empty
+    // for a freshly-loaded-but-unused model for well over a minute, so polling it
+    // for readiness would clear the spinner long before (or wrongly). Re-issuing
+    // a load for an already-resident model is a cheap Ollama no-op, so there's no
+    // pre-check either.
+    let note: string | undefined;
+    try {
+      note = await this.awaitLoad(modelID, ctrl.signal);
+    } finally {
+      this.loadsInFlight.delete(modelID);
+    }
+
+    if (ctrl.signal.aborted) {
+      this.post({ type: 'status', text: `Cancelled loading ${modelID}.`, kind: 'warn' });
+      setTimeout(() => this.post({ type: 'status', text: '' }), 3000);
+    } else if (note) {
+      this.post({ type: 'status', text: note, kind: 'warn' });
       setTimeout(() => this.post({ type: 'status', text: '' }), 4000);
     } else {
       this.post({ type: 'status', text: '' });
+      this.noteOnline(); // a completed load is proof the server is up
     }
-    // Always release the per-model spinner — even a failed load (e.g. the
-    // model's blobs are incomplete on the server) must not leave it spinning.
-    this.post({ type: 'loadSettled', modelID, error: result.note });
+    // Refresh model metadata FIRST (picks up real context/loaded from /api/ps,
+    // which normally reports the model ~0.1s after the load returns), THEN post
+    // loadSettled LAST so that, on success, its authoritative "mark loaded" wins
+    // even if that particular ps read transiently missed the just-loaded model.
+    // (The load request returning IS proof of residency, independent of ps.)
     await this.refreshModelsToWebview();
+    this.post({ type: 'loadSettled', modelID, mode: 'load', error: ctrl.signal.aborted ? 'cancelled' : note });
+  }
+
+  /**
+   * Reload an already-loaded model to apply a new context size. Ejects first
+   * (frees VRAM before reloading at a possibly-larger context, avoiding an OOM /
+   * eviction shuffle), then loads at the chosen context (ctxFor reads the
+   * override the webview just persisted via setModelCtxPref). Only the explicit
+   * Reload affordance reaches here — context is never changed automatically.
+   */
+  private async handleReloadModel(modelID: string): Promise<void> {
+    if (this.loadsInFlight.has(modelID)) {
+      return;
+    }
+    try {
+      await this.deps.ollama.unloadModel(modelID); // free VRAM first
+    } catch (err) {
+      logError(`reload: unload ${modelID}`, err);
+    }
+    await this.handleLoadModel(modelID); // loads at the new ctxFor() + posts settle
+  }
+
+  /**
+   * Run the load and resolve when it completes (the /api/generate call returns),
+   * fails, or the caller cancels. The load call blocks for the full — possibly
+   * multi-minute — load, so we tick `loadProgress` every 2s alongside it for the
+   * elapsed display, and resolve as soon as the load settles. Returns an
+   * optional problem note (undefined = success).
+   */
+  private async awaitLoad(modelID: string, signal: AbortSignal): Promise<string | undefined> {
+    const model = await this.deps.ollama.getModel(modelID).catch(() => undefined);
+    const want = this.ctxFor(modelID, model?.maxContextLength);
+    const startedAt = Date.now();
+
+    const tick = setInterval(() => {
+      if (!signal.aborted) {
+        this.post({
+          type: 'loadProgress',
+          modelID,
+          elapsedSec: Math.floor((Date.now() - startedAt) / 1000),
+          note: 'Large models can take a few minutes to load.',
+          mode: 'load',
+        });
+      }
+    }, 2000);
+
+    try {
+      const result = await Promise.race([
+        this.deps.ollama
+          .loadModel(modelID, want, this.keepAlive())
+          .then(() => ({ kind: 'done' as const, note: undefined as string | undefined }))
+          .catch((err) => ({ kind: 'done' as const, note: err instanceof Error ? err.message : String(err) })),
+        this.abortSignal(signal).then(() => ({ kind: 'cancel' as const, note: undefined })),
+      ]);
+      return result.note;
+    } finally {
+      clearInterval(tick);
+    }
+  }
+
+  /** A promise that resolves when the signal aborts. */
+  private abortSignal(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+  }
+
+  /** Cancel an in-flight load for `modelID` (user pressed Cancel). */
+  private cancelLoad(modelID: string): void {
+    this.loadsInFlight.get(modelID)?.abort();
+  }
+
+  /** Sleep that resolves early if the signal aborts. */
+  private sleep(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+      signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
   }
 
   /**
@@ -501,15 +653,63 @@ export class ChatBridge {
     await this.init();
   }
 
+  /**
+   * Eject a model and WAIT for it to actually leave VRAM. The unload request
+   * (keep_alive:0) returns near-instantly — but the model lingers in /api/ps for
+   * a moment (measured ~1s, longer under load) while it's torn down. So we poll
+   * /api/ps until the model is gone (or a timeout) before clearing the spinner,
+   * rather than reporting "ejected" while it's still resident.
+   */
   private async handleUnloadModel(modelID: string): Promise<void> {
-    this.post({ type: 'status', text: `Unloading ${modelID}…` });
+    if (this.loadsInFlight.has(modelID)) {
+      return; // a load/eject is already in flight for this model
+    }
+    const ctrl = new AbortController();
+    this.loadsInFlight.set(modelID, ctrl); // pauses keep-warm + powers the spinner
+    this.post({ type: 'status', text: `Ejecting ${modelID}…` });
+    const startedAt = Date.now();
+
+    const tick = setInterval(() => {
+      if (!ctrl.signal.aborted) {
+        this.post({
+          type: 'loadProgress',
+          modelID,
+          elapsedSec: Math.floor((Date.now() - startedAt) / 1000),
+          note: 'Ejecting…',
+          mode: 'eject',
+        });
+      }
+    }, 1000);
+
+    let note: string | undefined;
     try {
       await this.deps.ollama.unloadModel(modelID);
+      // Poll until the model is no longer resident (proof it actually unloaded).
+      const UNLOAD_TIMEOUT_MS = 30000;
+      while (!ctrl.signal.aborted) {
+        const stillLoaded = (await this.deps.ollama.loadedInstanceIds(modelID).catch(() => [])).length > 0;
+        if (!stillLoaded) {
+          break; // gone → done
+        }
+        if (Date.now() - startedAt > UNLOAD_TIMEOUT_MS) {
+          note = 'Eject is taking longer than expected; it may still be unloading.';
+          break;
+        }
+        await this.sleep(1500, ctrl.signal);
+      }
     } catch (err) {
       logError(`unload ${modelID}`, err);
+      note = err instanceof Error ? err.message : String(err);
+    } finally {
+      clearInterval(tick);
+      this.loadsInFlight.delete(modelID);
     }
-    this.post({ type: 'status', text: '' });
-    this.post({ type: 'loadSettled', modelID });
+
+    this.post({ type: 'status', text: note ?? '', kind: note ? 'warn' : undefined });
+    if (note) {
+      setTimeout(() => this.post({ type: 'status', text: '' }), 4000);
+    }
+    this.post({ type: 'loadSettled', modelID, mode: 'eject', error: note });
     await this.refreshModelsToWebview();
   }
 
@@ -521,7 +721,10 @@ export class ChatBridge {
     return list.map((m) => ({
       id: m.id,
       name: m.displayName,
-      loaded: m.state === 'loaded',
+      // undefined state = loaded-state unknown this round (e.g. /api/ps didn't
+      // answer); pass it through as undefined so the webview keeps its prior
+      // belief instead of falsely flipping a loaded model to "not loaded".
+      loaded: m.state === undefined ? undefined : m.state === 'loaded',
       contextLength: m.loadedContextLength,
       maxContextLength: m.maxContextLength,
       numCtx: this.ctxFor(m.id, m.maxContextLength),
@@ -676,7 +879,7 @@ export class ChatBridge {
       const result = await this.deps.ollama.ensureContext(
         this.currentModel,
         this.ctxFor(this.currentModel, model?.maxContextLength),
-        this.keepAlive(),
+        this.keepAlive(), // floored to ≥5m — never 0
         (m) => this.post({ type: 'status', text: m }),
       );
       if (result.note) {
@@ -812,12 +1015,3 @@ function deriveTitle(text: string): string {
   return title.charAt(0).toUpperCase() + title.slice(1);
 }
 
-function pickModel(preferences: string[], models: UiModel[]): string | undefined {
-  for (const pref of preferences) {
-    if (pref && models.some((m) => m.id === pref)) {
-      return pref;
-    }
-  }
-  const loaded = models.find((m) => m.loaded);
-  return loaded?.id ?? models[0]?.id;
-}

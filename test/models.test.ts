@@ -1,17 +1,34 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { formatModelDate, modelDisambiguator, modelIdentity, pickModel } from '../src/core/models';
+import {
+  formatLoadElapsed,
+  formatModelDate,
+  isModelReady,
+  mergeModelLoadedState,
+  modelDisambiguator,
+  modelIdentity,
+  pickModel,
+} from '../src/core/models';
 
 const M = (id: string, loaded = false) => ({ id, loaded });
 
-test('pickModel honors preference order, skipping ones that no longer exist', () => {
-  assert.equal(pickModel(['a', 'b'], [M('b'), M('c')]), 'b'); // a is gone, b wins
-  assert.equal(pickModel(['c', 'b'], [M('b'), M('c')]), 'c'); // first match wins
+test('pickModel: explicit default (preferences[0]) wins when it exists', () => {
+  assert.equal(pickModel(['c', 'b'], [M('b'), M('c')]), 'c'); // explicit default wins
+  // even over a different loaded model — an explicit default is deliberate.
+  assert.equal(pickModel(['c', 'b'], [M('b', true), M('c')]), 'c');
 });
 
-test('pickModel falls back to a loaded model, then the first available', () => {
-  assert.equal(pickModel(['gone'], [M('a'), M('b', true)]), 'b'); // prefer the loaded one
-  assert.equal(pickModel(['gone'], [M('a'), M('b')]), 'a'); // else first
+test('pickModel: a LOADED model beats a stored/last-used pick that is not loaded', () => {
+  // preferences[0] (explicit default) absent; stored pref "a" exists but "b" is
+  // actually loaded → open into the loaded one. (The bug was opening to a CTA
+  // for "a" while "b" sat loaded and ignored.)
+  assert.equal(pickModel(['', 'a'], [M('a'), M('b', true)]), 'b');
+  assert.equal(pickModel([undefined, 'a'], [M('a'), M('b', true)]), 'b');
+});
+
+test('pickModel: falls back to next preference, then first available', () => {
+  assert.equal(pickModel(['gone', 'a'], [M('a'), M('b')]), 'a'); // no loaded → stored pref
+  assert.equal(pickModel(['gone'], [M('a'), M('b')]), 'a'); // nothing → first
 });
 
 test('pickModel skips empty / null / undefined preferences', () => {
@@ -100,3 +117,46 @@ test('formatModelDate returns empty for missing or invalid input', () => {
   assert.equal(formatModelDate('', now), '');
   assert.equal(formatModelDate('not-a-date', now), '');
 });
+
+// ---- Load-state logic (the model-load bug fix) --------------------------
+
+test('mergeModelLoadedState preserves prior loaded when an update is unknown', () => {
+  const prev = [{ id: 'a', loaded: true }, { id: 'b', loaded: false }];
+  // An "unknown" refresh (loaded undefined for both) must keep prior beliefs.
+  const merged = mergeModelLoadedState(prev, [{ id: 'a' }, { id: 'b' }]);
+  assert.equal(merged.find((m) => m.id === 'a')!.loaded, true);
+  assert.equal(merged.find((m) => m.id === 'b')!.loaded, false);
+});
+
+test('mergeModelLoadedState lets a definite true/false win over prior', () => {
+  const prev = [{ id: 'a', loaded: true }];
+  assert.equal(mergeModelLoadedState(prev, [{ id: 'a', loaded: false }])[0].loaded, false);
+  assert.equal(mergeModelLoadedState([{ id: 'a', loaded: false }], [{ id: 'a', loaded: true }])[0].loaded, true);
+});
+
+test('mergeModelLoadedState leaves unknown as unknown for a brand-new model', () => {
+  // No prior entry → nothing to preserve → stays undefined (not coerced to false).
+  assert.equal(mergeModelLoadedState([], [{ id: 'new' }])[0].loaded, undefined);
+});
+
+test('isModelReady only when selected model is definitely loaded and not loading', () => {
+  const models = [{ id: 'a', loaded: true }, { id: 'b', loaded: false }, { id: 'c' }];
+  const none = new Set<string>();
+  assert.equal(isModelReady('a', models, none), true);
+  assert.equal(isModelReady('b', models, none), false, 'not loaded → not ready');
+  assert.equal(isModelReady('c', models, none), false, 'unknown loaded → not ready');
+  assert.equal(isModelReady('a', models, new Set(['a'])), false, 'mid-load → not ready');
+  assert.equal(isModelReady(null, models, none), false, 'no selection → not ready');
+  assert.equal(isModelReady('missing', models, none), false, 'unknown id → not ready');
+});
+
+test('formatLoadElapsed: empty under 1s, seconds under a minute, M:SS beyond', () => {
+  assert.equal(formatLoadElapsed(0), '');
+  assert.equal(formatLoadElapsed(0.4), '');
+  assert.equal(formatLoadElapsed(18), '18s');
+  assert.equal(formatLoadElapsed(59), '59s');
+  assert.equal(formatLoadElapsed(60), '1:00');
+  assert.equal(formatLoadElapsed(167), '2:47');
+  assert.equal(formatLoadElapsed(605), '10:05');
+});
+
