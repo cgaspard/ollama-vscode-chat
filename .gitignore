@@ -7,3 +7,7 @@ out-test/
 .claude/scheduled_tasks.lock
 # Bundled OpenCode binary is fetched at package time, never committed.
 bin/
+out-integration/
+.vscode-test/
+# Local scratch / agent-demo artifacts (not part of the extension).
+tetris.html

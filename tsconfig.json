@@ -14,5 +14,6 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "exclude": ["node_modules", "dist", "out", "test"]
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "out", "out-test", "out-integration", "test", "test-integration"]
 }

@@ -23,3 +23,7 @@ media/screenshots/**
 releasenotes/**
 *HANDOFF.md
 sample-workspace/**
+out-integration/**
+test-integration/**
+tsconfig.integration.json
+.vscode-test/**
