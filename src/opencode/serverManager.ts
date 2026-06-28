@@ -259,7 +259,10 @@ export class OpencodeServerManager {
             input: m.vision ? ['text', 'image'] : ['text'],
             output: ['text'],
           },
-          limit: { context: ctx, output: Math.min(8192, Math.floor(ctx / 2)) },
+          // Output budget: generous enough for reasoning models that emit long
+          // <think> blocks before answering (8192 truncated them mid-thought),
+          // but still a fraction of the window so input isn't crowded out.
+          limit: { context: ctx, output: Math.min(32768, Math.floor(ctx / 4)) },
         };
       }
     } catch (err) {

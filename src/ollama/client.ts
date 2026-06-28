@@ -11,8 +11,11 @@ export interface OllamaModel {
   toolUse?: boolean;
   vision?: boolean;
   reasoning?: boolean;
-  quantization?: string;
-  family?: string;
+  quantization?: string; // e.g. "Q4_K_M", "Q8_0" (details.quantization_level)
+  family?: string; // model family, e.g. "llama", "qwen3" (details.family)
+  publisher?: string; // disambiguator slot — for Ollama this is the family
+  format?: string; // runtime format badge, e.g. "GGUF" (from details.format)
+  created?: string; // when the model was pulled/created locally (/api/tags modified_at, ISO-8601)
 }
 
 const TIMEOUT = (ms: number) => AbortSignal.timeout(ms);
@@ -77,7 +80,10 @@ export class OllamaClient {
     );
 
     return detailed
-      .filter(({ caps, m }) => !caps.includes('embedding') && !/embed/i.test(m.name ?? ''))
+      .filter(
+        ({ caps, m }) =>
+          m && typeof m.name === 'string' && !caps.includes('embedding') && !/embed/i.test(m.name),
+      )
       .map(({ m, caps, maxCtx }): OllamaModel => ({
         id: m.name,
         displayName: prettyName(m.name),
@@ -90,6 +96,12 @@ export class OllamaClient {
         reasoning: caps.includes('thinking'),
         quantization: m.details?.quantization_level,
         family: m.details?.family,
+        // Ollama has no "publisher"; the family is the best same-name
+        // disambiguator (e.g. a "coder" tag from llama vs qwen3).
+        publisher: m.details?.family,
+        format: prettyFormat(m.details?.format),
+        // When the model was pulled/created locally. /api/tags only.
+        created: typeof m.modified_at === 'string' ? m.modified_at : undefined,
       }));
   }
 
@@ -193,7 +205,20 @@ export class OllamaClient {
 }
 
 function prettyName(id: string): string {
+  if (!id) {
+    return 'unknown';
+  }
   return id.replace(/:latest$/, '');
+}
+
+// Ollama's `details.format` (e.g. "gguf") → a clean badge label. Unknown values
+// are upper-cased as-is so new runtimes still surface something.
+function prettyFormat(format?: string): string | undefined {
+  if (!format) {
+    return undefined;
+  }
+  const known: Record<string, string> = { gguf: 'GGUF', mlx: 'MLX', safetensors: 'Safetensors' };
+  return known[format.toLowerCase()] ?? format.toUpperCase();
 }
 
 /**
