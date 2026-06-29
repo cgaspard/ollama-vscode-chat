@@ -1,0 +1,21 @@
+version: 0.4.0
+date: 2026-06-28
+highlights:
+  - A much more reliable model-loading experience, plus /compact, an agent todo checklist, and a richer model picker.
+added:
+  - /compact slash command — summarize the conversation in place to free up context; the summarizer turn collapses into a quiet "compacted" chip.
+  - Agent todo checklist — the model's todowrite tool now renders as one live checklist per turn with progress.
+  - Model picker shows each model's publisher/family, format, quantization, and pull date, and disambiguates same-named models.
+  - "Load a model" call-to-action — when no model is ready the composer button invites you to load one (and opens the picker) instead of a dead Send.
+  - Live load progress with an elapsed timer for long loads, a Cancel control, and a reassurance that large models can take a few minutes.
+  - Reload action — changing a loaded model's context shows Reload (apply the new context) alongside Eject.
+changed:
+  - Send is gated until the selected model is actually loaded; on startup the picker prefers a model that's already loaded.
+  - Keep-alive minimum is now 5 minutes (the "Off" option is removed) so a model you load can't immediately unload itself.
+  - Larger output budget for reasoning models so long thinking blocks aren't truncated.
+fixed:
+  - Loading a model no longer reloads it at the wrong (configured) context or unloads it right after — including the 15s keep-warm refresh, which previously reloaded the model and reset its context.
+  - Eject now waits for the model to actually unload before clearing its spinner, and a failed load no longer leaves a stuck spinner.
+  - The picker no longer flips a just-loaded model back to "not loaded" on a transient server hiccup; any successful response restores the online state immediately.
+  - The Load/Eject button is legible on the highlighted (selected) model row.
+removed: []
