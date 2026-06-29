@@ -1117,6 +1117,14 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* action area: one button normally, two (Reload + Eject) when a context change
+   is pending on a loaded model */
+.model-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .model-action {
   flex: 0 0 auto;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
@@ -1177,12 +1185,14 @@ body {
     transparent
   );
 }
-.model-row.active .model-action.load {
+.model-row.active .model-action.load,
+.model-row.active .model-action.reload {
   background: var(--vscode-list-activeSelectionForeground, #fff);
   color: var(--vscode-list-activeSelectionBackground, var(--accent));
   border-color: transparent;
 }
-.model-row.active .model-action.load:hover {
+.model-row.active .model-action.load:hover,
+.model-row.active .model-action.reload:hover {
   opacity: 0.9;
 }
 .model-row.active .model-action.eject:hover {

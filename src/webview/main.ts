@@ -929,6 +929,24 @@ function renderModelMenu(): void {
     const nameTag = tag
       ? `<span class="model-name">${escapeHtml(m.name)}</span><span class="model-pub-tag${tagIsId ? ' id' : ''}">${escapeHtml(tag)}</span>`
       : `<span class="model-name">${escapeHtml(m.name)}</span>`;
+    // Build the action area. While loading it's a single busy/cancel button.
+    // Otherwise: a not-loaded model shows "Load"; a loaded model shows "Eject",
+    // and ALSO "Reload" when its chosen context differs (both available — Reload
+    // applies the new context, Eject unloads — they're distinct actions).
+    const ejectMode = loadModeById.get(m.id) === 'eject';
+    let actionsHtml: string;
+    if (loading) {
+      actionsHtml = ejectMode
+        ? `<button class="model-action busy" aria-busy="true">${icon.spinner}<span>Ejecting…${loadElapsedLabel(m.id)}</span></button>`
+        : `<button class="model-action busy" aria-busy="true" title="Cancel loading">${icon.spinner}<span>Loading…${loadElapsedLabel(m.id)}</span><span class="cancel-x">✕</span></button>`;
+    } else if (!m.loaded) {
+      actionsHtml = `<button class="model-action load" data-act="load">Load</button>`;
+    } else {
+      const reloadBtn = reloadPending
+        ? `<button class="model-action reload" data-act="reload" title="Reload at ${formatTokens(m.numCtx || 0)} context">Reload</button>`
+        : '';
+      actionsHtml = `${reloadBtn}<button class="model-action eject" data-act="eject">Eject</button>`;
+    }
     row.innerHTML = `
       <span class="model-dot${m.loaded ? ' loaded' : ''}"></span>
       <span class="model-info">
@@ -936,28 +954,10 @@ function renderModelMenu(): void {
         ${ident ? `<span class="model-ident">${escapeHtml(ident)}</span>` : ''}
         <span class="model-meta">${m.loaded ? 'loaded · ' : ''}${ctx}${caps ? ' · <span class="model-caps">' + caps + '</span>' : ''}</span>
       </span>
-      <button class="model-action ${loading ? 'busy' : reloadPending ? 'reload' : m.loaded ? 'eject' : 'load'}" aria-busy="${loading}" title="${
-        loading && loadModeById.get(m.id) !== 'eject'
-          ? 'Cancel loading'
-          : reloadPending
-            ? `Reload at ${formatTokens(m.numCtx || 0)} context`
-            : ''
-      }">
-        ${
-          loading
-            ? loadModeById.get(m.id) === 'eject'
-              ? `${icon.spinner}<span>Ejecting…${loadElapsedLabel(m.id)}</span>`
-              : `${icon.spinner}<span>Loading…${loadElapsedLabel(m.id)}</span><span class="cancel-x">✕</span>`
-            : reloadPending
-              ? 'Reload'
-              : m.loaded
-                ? 'Eject'
-                : 'Load'
-        }
-      </button>`;
+      <span class="model-actions">${actionsHtml}</span>`;
     // While LOADING (not ejecting), show a reassurance line so a multi-minute
     // load doesn't look hung.
-    if (loading && loadModeById.get(m.id) !== 'eject') {
+    if (loading && !ejectMode) {
       const hint = document.createElement('div');
       hint.className = 'model-load-hint';
       hint.textContent = 'Large models can take a few minutes to load — you can keep typing.';
@@ -972,46 +972,60 @@ function renderModelMenu(): void {
       syncSendEnabled(); // a newly-selected model may not be loaded → gate Send
       closeModelMenu();
     });
-    // Action button: while loading it CANCELS; otherwise it loads / ejects.
-    const action = row.querySelector('.model-action') as HTMLButtonElement;
-    action.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (loading) {
-        // An eject can't be cancelled mid-flight; ignore clicks on it.
-        if (loadModeById.get(m.id) === 'eject') {
-          return;
-        }
-        // Cancel the in-flight load and release local state.
-        post({ type: 'cancelLoad', modelID: m.id });
-        state.loadingModels.delete(m.id);
-        state.loadStartedAt.delete(m.id);
-        loadModeById.delete(m.id);
-        renderModelMenu();
-        syncSendEnabled();
-        return;
-      }
-      // Reload: model is loaded but the chosen context differs → apply it by
-      // reloading at the new context (persist the choice, then load).
-      if (reloadPending) {
-        state.currentModel = m.id;
-        post({ type: 'selectModel', modelID: m.id });
-        post({ type: 'setModelCtx', modelID: m.id, numCtx: m.numCtx as number });
-        beginModelLoad(m.id, 'load');
-        post({ type: 'reloadModel', modelID: m.id });
-        renderModelMenu();
-        syncSendEnabled();
-        return;
-      }
+    const doLoad = () => {
       if (!m.loaded) {
         state.currentModel = m.id;
         post({ type: 'selectModel', modelID: m.id });
         renderMeter();
         closeMenuOnLoad = true; // dismiss the menu once this load completes
       }
-      beginModelLoad(m.id, m.loaded ? 'eject' : 'load');
-      post({ type: m.loaded ? 'unloadModel' : 'loadModel', modelID: m.id });
+      beginModelLoad(m.id, 'load');
+      post({ type: 'loadModel', modelID: m.id });
       renderModelMenu();
       syncSendEnabled();
+    };
+    const doEject = () => {
+      beginModelLoad(m.id, 'eject');
+      post({ type: 'unloadModel', modelID: m.id });
+      renderModelMenu();
+      syncSendEnabled();
+    };
+    const doReload = () => {
+      // Apply the chosen context by reloading at it (persist, then reload).
+      state.currentModel = m.id;
+      post({ type: 'selectModel', modelID: m.id });
+      post({ type: 'setModelCtx', modelID: m.id, numCtx: m.numCtx as number });
+      beginModelLoad(m.id, 'load');
+      post({ type: 'reloadModel', modelID: m.id });
+      renderModelMenu();
+      syncSendEnabled();
+    };
+    const doCancel = () => {
+      post({ type: 'cancelLoad', modelID: m.id });
+      state.loadingModels.delete(m.id);
+      state.loadStartedAt.delete(m.id);
+      loadModeById.delete(m.id);
+      renderModelMenu();
+      syncSendEnabled();
+    };
+    row.querySelectorAll('.model-action').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (loading) {
+          if (!ejectMode) {
+            doCancel(); // an eject in flight can't be cancelled
+          }
+          return;
+        }
+        const act = (btn as HTMLElement).dataset.act;
+        if (act === 'load') {
+          doLoad();
+        } else if (act === 'eject') {
+          doEject();
+        } else if (act === 'reload') {
+          doReload();
+        }
+      });
     });
     modelMenuList.appendChild(row);
   }

@@ -460,8 +460,14 @@ export class ChatBridge {
    * Re-assert keep_alive on the currently-selected model if it's loaded.
    * OpenCode's chat requests reset Ollama's keep_alive to its ~5min default, so
    * without this the user's keepAlive choice wouldn't stick. Re-loading with the
-   * same num_ctx is a cheap no-op on Ollama's side (no weight reload), it just
-   * refreshes the timer. (keep_alive is always ≥5m now — never 0.)
+   * SAME num_ctx is a cheap no-op (just refreshes the timer).
+   *
+   * CRITICAL: we re-load with the model's ACTUALLY-LOADED context and nothing
+   * else. We must never pass a guessed/config context here — doing so (the old
+   * `|| ctxFor(...)` fallback) reloaded the model at a DIFFERENT context every
+   * 15s, which forced a full reload and stomped the user's chosen context (e.g.
+   * back to 256K). If /api/ps doesn't report the loaded context, we SKIP the
+   * refresh rather than risk changing it; the model keeps its own keep_alive.
    */
   private async keepWarm(list: OllamaModel[]): Promise<void> {
     if (!this.currentModel) {
@@ -471,8 +477,12 @@ export class ChatBridge {
     if (!m || m.state !== 'loaded') {
       return;
     }
-    const ctx = m.loadedContextLength || this.ctxFor(m.id, m.maxContextLength);
-    await this.deps.ollama.loadModel(m.id, ctx, this.keepAlive());
+    const loadedCtx = m.loadedContextLength;
+    if (!loadedCtx || loadedCtx <= 0) {
+      return; // unknown loaded context → don't touch it (would risk a reload)
+    }
+    // Bare timer refresh at the SAME context — no reload, no inference.
+    await this.deps.ollama.refreshKeepAlive(m.id, loadedCtx, this.keepAlive());
   }
 
   /** Effective num_ctx for a model: per-model override, else the global default, clamped to the model's max. */

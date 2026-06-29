@@ -106,7 +106,8 @@ describe('Send gating + Load CTA', function () {
     assert.strictEqual(await count('.send-btn.cta'), 1, 'selecting an unloaded model re-gates Send');
   });
 
-  it('a loaded model whose context is changed shows a Reload action (not auto-applied)', async () => {
+  it('changing a loaded model context offers Reload alongside Eject (both available, not auto-applied)', async () => {
+    await openPanel(); // fresh webview state (prior tests leave loading state)
     // A model loaded at 32K (contextLength) and selected.
     await helpers.post({
       type: 'models',
@@ -115,15 +116,16 @@ describe('Send gating + Load CTA', function () {
     });
     await click('#model-btn');
     await waitFor('.model-row', (n) => n >= 1);
-    // Initially the loaded model shows Eject, no Reload.
+    // Initially the loaded model shows only Eject, no Reload.
     assert.strictEqual(await count('.model-action.reload'), 0, 'no Reload while ctx matches what is loaded');
     assert.strictEqual(await count('.model-action.eject'), 1, 'loaded model shows Eject');
-    // Pick a DIFFERENT context chip (a ctx-preset that isn't the active 32K).
-    await click('.ctx-preset:not(.active)');
-    // The action becomes Reload — the change is offered, NOT auto-applied.
+    // Pick a DIFFERENT context chip — scope to #ctx-presets (keep-alive chips
+    // reuse .ctx-preset, so an unscoped selector is ambiguous).
+    await click('#ctx-presets .ctx-preset:not(.active)');
+    // Reload appears — the change is offered, NOT auto-applied — and Eject stays.
     await waitFor('.model-action.reload', (n) => n === 1);
     assert.strictEqual(await count('.model-action.reload'), 1, 'changing ctx offers Reload');
-    assert.strictEqual(await count('.model-action.eject'), 0, 'Eject is replaced by Reload');
+    assert.strictEqual(await count('.model-action.eject'), 1, 'Eject remains available alongside Reload');
   });
 });
 

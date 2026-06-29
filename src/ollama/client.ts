@@ -200,6 +200,26 @@ export class OllamaClient {
     return { contextLength };
   }
 
+  /**
+   * Refresh an already-loaded model's keep_alive timer WITHOUT changing it or
+   * running inference. A bare warm call (no prompt) at the SAME num_ctx is a
+   * no-op on Ollama's side — it just resets the unload timer. Used by the
+   * keep-warm poll. `contextLength` MUST be the model's currently-loaded context
+   * (passing a different value would force a reload). Never throws.
+   */
+  async refreshKeepAlive(modelId: string, contextLength: number, keepAlive: string): Promise<void> {
+    await fetch(`${this.rest}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: modelId,
+        keep_alive: coerceKeepAlive(keepAlive),
+        options: { num_ctx: contextLength },
+      }),
+      signal: TIMEOUT(30000),
+    }).catch(() => undefined);
+  }
+
   /** Unload a model from memory (keep_alive: 0). */
   async unloadModel(modelId: string): Promise<void> {
     await fetch(`${this.rest}/api/generate`, {
