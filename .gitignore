@@ -14,3 +14,7 @@ tetris.html
 
 # Playwright MCP run artifacts (created when testing the sample)
 .playwright-mcp/
+
+# Skill/MCP run artifacts created when testing the sample workspace
+sample-workspace/.opencode/node_modules/
+sample-workspace/.opencode/**/node_modules/

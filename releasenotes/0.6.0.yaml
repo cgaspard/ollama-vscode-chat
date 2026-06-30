@@ -1,0 +1,23 @@
+version: 0.6.0
+date: 2026-06-30
+highlights:
+  - Skills and server slash commands — the agent's discovered skills and your custom OpenCode commands now appear in the composer's slash menu, plus a new /skills panel.
+  - Editor selection as context — highlight code in a file and it's automatically shared with your next prompt (the exact lines + range), the way Claude Code shares a selection.
+added:
+  - Server slash commands and skills in the slash menu — type "/" to see your custom OpenCode commands and the model's skills alongside the built-ins; skills carry a "skill" badge.
+  - /skills command — lists every skill the agent discovered, tagged by source (project / global / built-in) with its SKILL.md path.
+  - Editor-selection context — whatever you have highlighted in a file is auto-attached to your prompt as a scoped snippet labeled with its file and line range. No setup, no toggle to manage.
+  - Image attachments redesigned as compact chips with name + dimensions, and a click-to-zoom lightbox.
+  - Floating New Chat / History / Open-in-Editor-Tab actions in the top-right of the panel.
+changed:
+  - Sessions are now created lazily — a "New chat" only becomes a history entry once you actually send something, so empty chats no longer pile up.
+  - Composer redesign — pasted images and the open-file reference moved into an attachments row above the input, with the active file shown as a quiet inline reference instead of a filled pill.
+fixed:
+  - The auto-attached selection no longer disappears the moment you click into the chat box to type; it's kept until you change or clear the selection.
+  - The image lightbox close (X) button now works when you click the icon itself, not just the area around it.
+  - Server commands and skills with no arguments no longer fail — the required `arguments` field is always sent.
+  - The empty-session cleanup is scoped to the current workspace and skips in-flight sessions, so it can never delete another window's or another workspace's chats.
+  - First-send session creation is race-safe — two quick sends (or a send plus a command) no longer create a duplicate empty session or misroute a reply.
+  - Skills in a sibling folder that merely shares the workspace name as a path prefix are no longer mislabelled as project skills.
+removed:
+  - The native view-title buttons moved into an always-visible in-panel action cluster (New Chat / History / Open in Tab).

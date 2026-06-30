@@ -2,7 +2,7 @@
   "name": "ollama-code",
   "displayName": "Ollama Code",
   "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "cgaspard",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -101,25 +101,6 @@
         "title": "Ollama Code: Focus Chat"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "ollamaCode.newChat",
-          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ollamaCode.history",
-          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ollamaCode.openInTab",
-          "when": "view == ollamaCode.chat || view == ollamaCode.chatSecondary",
-          "group": "navigation@3"
-        }
-      ]
-    },
     "configuration": {
       "title": "Ollama Code",
       "properties": {

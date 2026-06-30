@@ -45,6 +45,11 @@ export async function classes(selector: string): Promise<string[]> {
   return (await exec({ __test__: 'query', selector, prop: 'class' })).values;
 }
 
+/** Set the composer input value and fire its input event (drives autocomplete). */
+export async function setInput(value: string): Promise<void> {
+  await exec({ __test__: 'setInput', value });
+}
+
 /** Dispatch a real click on the first match. Returns false if nothing matched. */
 export async function click(selector: string): Promise<boolean> {
   return (await exec({ __test__: 'click', selector })).ok;
