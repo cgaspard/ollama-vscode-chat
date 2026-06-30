@@ -9,11 +9,12 @@ import { pickModel } from '../core/models';
 import { ServerRegistry } from '../connection';
 import { OllamaClient, OllamaModel } from '../ollama/client';
 import { log, logError } from '../logger';
+import { discoverMcpServers } from '../mcp/discovery';
 import { OpencodeClient } from '../opencode/client';
 import { OpencodeEvent, PromptBody } from '../opencode/protocol';
 import { OpencodeServerManager } from '../opencode/serverManager';
 import { Prefs } from '../prefs';
-import { HostToWebview, UiImage, UiModel, UiSession, WebviewToHost } from '../shared';
+import { HostToWebview, UiImage, UiMcpServer, UiModel, UiSession, WebviewToHost } from '../shared';
 
 export interface BridgeDeps {
   context: vscode.ExtensionContext;
@@ -267,6 +268,9 @@ export class ChatBridge {
         case 'openFile':
           await this.openFile(msg.path);
           break;
+        case 'requestMcpStatus':
+          await this.sendMcpStatus();
+          break;
         case 'retryConnect':
           await this.init();
           break;
@@ -405,6 +409,58 @@ export class ChatBridge {
         `Ollama Code: ${found.join(' + ')} is ~${Math.round(estTokens / 1000)}k tokens (~${pct}% of your ${Math.round(win / 1000)}k context)${over ? ' — larger than the context window' : ''}. It's auto-included on every request and may crowd out the conversation. Consider trimming it or raising ollamaCode.minContextLength.`,
       );
     }
+  }
+
+  /**
+   * Gather MCP server status for the `/mcp` panel: the live connection state
+   * from the server (GET /mcp) cross-referenced with the discovered config so
+   * each row also shows its transport + command/url — even a failed or disabled
+   * server the live map might report tersely. Posts an `mcpStatus` message;
+   * `servers: []` means none are configured.
+   */
+  private async sendMcpStatus(): Promise<void> {
+    // Configured servers (for transport + detail), keyed by name.
+    let configured: ReturnType<typeof discoverMcpServers>['map'] = {};
+    try {
+      configured = discoverMcpServers().map;
+    } catch (err) {
+      logError('mcp discovery for /mcp panel', err);
+    }
+
+    // Live status from the running server, if reachable. Failure to fetch
+    // (server down) just means we show the configured set without live state.
+    let live: Record<string, { status?: string; error?: string }> = {};
+    if (this.client) {
+      try {
+        live = (await this.client.listMcp()) as typeof live;
+      } catch (err) {
+        logError('GET /mcp failed', err);
+      }
+    }
+
+    // Union the two key sets so a configured-but-not-yet-reported server still
+    // shows, and a live server we somehow didn't configure isn't hidden.
+    const names = new Set<string>([...Object.keys(configured), ...Object.keys(live)]);
+    const servers: UiMcpServer[] = [...names].sort().map((name) => {
+      const cfg = configured[name];
+      const transport: 'local' | 'remote' | undefined = cfg
+        ? cfg.type === 'remote'
+          ? 'remote'
+          : 'local'
+        : undefined;
+      let detail: string | undefined;
+      if (cfg?.type === 'remote') {
+        detail = cfg.url;
+      } else if (cfg?.type === 'local') {
+        detail = cfg.command.join(' ');
+      }
+      // A configured-but-disabled server may not appear in the live map; reflect
+      // its config state so the panel still shows it as disabled.
+      const status = live[name]?.status ?? (cfg?.enabled === false ? 'disabled' : 'pending');
+      return { name, status, error: live[name]?.error, transport, detail };
+    });
+
+    this.post({ type: 'mcpStatus', servers });
   }
 
   private postServers(connected: boolean): void {

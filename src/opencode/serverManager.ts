@@ -6,8 +6,10 @@ import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
 import { resolveBinaryPath } from '../core/binary';
 import { clampContext } from '../core/context';
+import { augmentedPath } from '../core/mcp';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
+import { discoverMcpServers } from '../mcp/discovery';
 import { Prefs } from '../prefs';
 import { OpencodeClient } from './client';
 import { BUILD_PROMPT, PLAN_PROMPT } from './prompts';
@@ -222,6 +224,11 @@ export class OpencodeServerManager {
       // Point OpenCode's native ollama provider at the active server.
       OLLAMA_HOST: this.ollama.getBaseUrl(),
       NO_COLOR: '1',
+      // Augment PATH so stdio MCP servers (command: ["npx"/"uvx"/...]) can be
+      // spawned even when the extension host was launched from a GUI context
+      // with a minimal PATH (the #1 reason npx-based MCP servers fail to start).
+      // Existing entries are kept first so a user's own toolchain still wins.
+      PATH: augmentedPath(process.env.PATH, os.homedir(), path.delimiter),
       // Sandbox all on-disk state to our managed dir.
       XDG_DATA_HOME: sub('data'),
       XDG_CONFIG_HOME: sub('config'),
@@ -287,6 +294,18 @@ export class OpencodeServerManager {
     // OLLAMA_CONTEXT_LENGTH, not by us; our per-model context drives only
     // OpenCode's `limit.context` (compaction budget + meter). keep_alive is
     // applied out-of-band by the bridge's keep-warm poll via /api/generate.
+    // MCP servers discovered from .mcp.json / .vscode/mcp.json / VS Code user
+    // settings / our own `ollamaCode.mcpServers`. Tokens like ${VAR} are already
+    // resolved to literals (OPENCODE_CONFIG_CONTENT is not substituted by
+    // OpenCode), so what we inject is ready to spawn as-is. Their tools flow
+    // through OpenCode's existing tool-call + permission machinery for free.
+    let mcp: ReturnType<typeof discoverMcpServers>['map'] = {};
+    try {
+      mcp = discoverMcpServers().map;
+    } catch (err) {
+      logError('could not discover MCP servers', err);
+    }
+
     const config = {
       $schema: 'https://opencode.ai/config.json',
       // Let the model ask the user clarifying questions via the built-in
@@ -306,6 +325,7 @@ export class OpencodeServerManager {
           ...(Object.keys(models).length ? { models } : {}),
         },
       },
+      ...(Object.keys(mcp).length ? { mcp } : {}),
     };
     return JSON.stringify(config);
   }

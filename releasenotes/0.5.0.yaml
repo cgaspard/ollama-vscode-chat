@@ -1,0 +1,14 @@
+version: 0.5.0
+date: 2026-06-29
+highlights:
+  - MCP (Model Context Protocol) servers — extend the agent with external tools, auto-discovered from the configs you already have.
+added:
+  - MCP server support — the agent can call tools from any MCP server (browser automation, databases, issue trackers, docs, and more), run by the bundled OpenCode agent.
+  - Zero re-entry — servers you already configured for Claude Code (.mcp.json) or VS Code Copilot (.vscode/mcp.json and the user mcp setting) are picked up automatically.
+  - New ollamaCode.mcpServers setting to add a server just for Ollama Code, or override a discovered one; later sources win on a name collision.
+  - /mcp slash command — lists your configured servers with their live connection status (connected / disabled / failed), transport, command or URL, and any error reason.
+  - Both local (stdio) and remote (http/sse) transports, with ${VAR} references in env values and headers resolved from the environment before launch, and per-server enabled toggles.
+changed:
+  - Editing ollamaCode.mcpServers (or VS Code's mcp setting) restarts the agent automatically so new servers take effect; .mcp.json / .vscode/mcp.json edits apply on the next server restart or window reload.
+fixed: []
+removed: []

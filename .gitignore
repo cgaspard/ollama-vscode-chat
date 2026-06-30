@@ -11,3 +11,6 @@ out-integration/
 .vscode-test/
 # Local scratch / agent-demo artifacts (not part of the extension).
 tetris.html
+
+# Playwright MCP run artifacts (created when testing the sample)
+.playwright-mcp/

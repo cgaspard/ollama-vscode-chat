@@ -28,6 +28,19 @@ export interface UiServer {
   url: string;
 }
 
+/** One MCP server's status, as shown in the /mcp panel. */
+export interface UiMcpServer {
+  name: string;
+  /** 'connected' | 'disabled' | 'failed' | 'pending' (or any future status). */
+  status: string;
+  /** Failure reason, when status is 'failed'. */
+  error?: string;
+  /** 'local' (stdio) or 'remote' (http/sse), when known from the config. */
+  transport?: 'local' | 'remote';
+  /** The command (local) or url (remote) it was configured with, for display. */
+  detail?: string;
+}
+
 // ---- Host -> Webview -----------------------------------------------------
 export type HostToWebview =
   | {
@@ -63,6 +76,9 @@ export type HostToWebview =
   | { type: 'activeFile'; path: string | null; chars: number }
   | { type: 'status'; text: string; kind?: 'info' | 'warn' | 'error' }
   | { type: 'command'; command: 'history' | 'newChat' | 'focusInput' }
+  // Result of a /mcp request: the configured MCP servers and their live status.
+  // `servers` is empty when none are configured.
+  | { type: 'mcpStatus'; servers: UiMcpServer[] }
   | { type: 'error'; message: string };
 
 // ---- Webview -> Host -----------------------------------------------------
@@ -101,4 +117,5 @@ export type WebviewToHost =
   | { type: 'questionReply'; requestID: string; answers: string[][] }
   | { type: 'questionReject'; requestID: string }
   | { type: 'openFile'; path: string }
+  | { type: 'requestMcpStatus' }
   | { type: 'retryConnect' };
