@@ -61,39 +61,20 @@ describe('v0.6.0 webview features', function () {
     });
   });
 
-  describe('editor-selection pill (visible + excludable)', () => {
-    it('is hidden when there is no selection', async () => {
-      await post({ type: 'activeSelection', selection: null });
-      await waitFor('#ctxsel.hidden', (n) => n === 1);
-      assert.strictEqual(await count('#ctxsel.hidden'), 1, 'selection pill hidden with no selection');
-    });
-
-    it('surfaces an attached selection as a labeled, included-by-default pill', async () => {
+  describe('editor selection (silent auto-attach — no pill)', () => {
+    it('renders no selection pill: the selection is attached silently', async () => {
       await post({
         type: 'activeSelection',
         selection: { path: 'src/app.js', startLine: 14, endLine: 19, chars: 120 },
       });
-      await waitFor('#ctxsel:not(.hidden)', (n) => n === 1);
-      assert.strictEqual(await text('#ctxsel-name'), 'app.js:14-19', 'shows basename:range');
-      const cls = await attr('#ctxsel', 'class');
-      assert.ok(cls?.includes('active'), 'included (active) by default — so it is not silent');
-      assert.ok(cls?.includes('ctxref'), 'uses the quiet ctxref style');
+      // The pill was removed by design (selection is always-on, no opt-out UI):
+      // no #ctxsel element may exist, with or without an active selection.
+      assert.strictEqual(await count('#ctxsel'), 0, 'no selection pill element');
     });
 
-    it('clicking the pill excludes the selection (drops the active state)', async () => {
-      assert.ok(await click('#ctxsel'), 'pill is clickable');
-      await waitFor('#ctxsel:not(.active)', (n) => n === 1);
-      const cls = await attr('#ctxsel', 'class');
-      assert.ok(!cls?.includes('active'), 'excluded after click — user can opt out');
-    });
-
-    it('a new selection re-arms inclusion', async () => {
-      await post({
-        type: 'activeSelection',
-        selection: { path: 'src/other.ts', startLine: 3, endLine: 3, chars: 40 },
-      });
-      await waitFor('#ctxsel.active', (n) => n === 1);
-      assert.strictEqual(await text('#ctxsel-name'), 'other.ts:3', 'single line shows just the number');
+    it('clearing the selection is also silent (no pill appears)', async () => {
+      await post({ type: 'activeSelection', selection: null });
+      assert.strictEqual(await count('#ctxsel'), 0, 'still no selection pill element');
     });
   });
 
