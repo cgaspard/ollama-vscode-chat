@@ -1,0 +1,12 @@
+version: 0.8.0
+date: 2026-07-02
+highlights:
+  - Goals now listen — if something you type mid-goal changes the objective, you'll be offered a one-click goal update instead of the loop chasing a stale target.
+added:
+  - Goal revision detection — while a goal is active, each message you send is checked (by your local model, in the background) for whether it changes what the goal is; guidance about how to work, questions, and encouragement leave the goal alone.
+  - A confirm card in the chat when a message does change the goal, showing the revised objective with Update goal / Keep current buttons — nothing changes unless you confirm.
+  - Confirming an update swaps the objective in place — the progress judge immediately starts checking against the new target, the round budget resets, and elapsed time carries over.
+changed:
+  - Clearing or replacing a goal retires any pending goal-update offer so a stale confirmation can never apply.
+fixed: []
+removed: []

@@ -961,6 +961,11 @@ body {
   background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
   color: var(--vscode-foreground);
 }
+/* The goal-revision confirm card reuses the permission-card styles; its detail
+   is a prose objective, not code, so use the UI font. */
+.goal-revise-card .perm-detail {
+  font-family: var(--vscode-font-family);
+}
 .composer-box {
   position: relative;
   background: var(--vscode-input-background);

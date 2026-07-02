@@ -1132,6 +1132,54 @@ function formatElapsed(ms: number): string {
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+// The host noticed a message the user typed seems to change the active goal.
+// Nothing changes unless the user confirms here — Update sends updateGoal back.
+// At most one offer is open at a time; a newer one replaces the old.
+let goalReviseCard: HTMLElement | null = null;
+
+function renderGoalRevision(proposed: string): void {
+  goalReviseCard?.remove();
+  const card = document.createElement('div');
+  card.className = 'perm-card goal-revise-card';
+  card.innerHTML = `
+    <div class="perm-head">\u{1F3AF} Update the goal? Your last message looks like it changes it.</div>
+    <pre class="perm-detail">${escapeHtml(proposed)}</pre>
+    <div class="perm-actions">
+      <button class="perm-btn allow-once update">Update goal</button>
+      <button class="perm-btn reject keep">Keep current</button>
+    </div>`;
+  const resolve = (updated: boolean, note: string) => {
+    if (updated) {
+      post({ type: 'updateGoal', objective: proposed });
+    }
+    card.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    card.classList.add('resolved');
+    const el = document.createElement('div');
+    el.className = 'perm-resolved';
+    el.textContent = note;
+    card.appendChild(el);
+  };
+  card.querySelector('.update')!.addEventListener('click', () => resolve(true, 'Goal updated'));
+  card.querySelector('.keep')!.addEventListener('click', () => resolve(false, 'Kept the current goal'));
+  messagesEl.appendChild(card);
+  goalReviseCard = card;
+  toggleWelcome();
+  forceScrollToBottom(); // an offer must be visible to be actioned
+}
+
+/** Retire an unresolved revision offer (the goal it targeted is gone). */
+function retireGoalRevision(): void {
+  const card = goalReviseCard;
+  if (card && !card.classList.contains('resolved')) {
+    card.querySelectorAll('button').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    card.classList.add('resolved');
+    const el = document.createElement('div');
+    el.className = 'perm-resolved';
+    el.textContent = 'Goal ended';
+    card.appendChild(el);
+  }
+}
+
 function addImage(file: File): Promise<void> {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -2948,7 +2996,13 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       break;
     case 'goal':
       state.activeGoal = msg.goal;
+      if (!msg.goal) {
+        retireGoalRevision(); // an open offer can't apply to a cleared goal
+      }
       renderGoalBar();
+      break;
+    case 'goalRevision':
+      renderGoalRevision(msg.proposed);
       break;
     case 'goalEvent':
       if (msg.kind === 'checking') {
@@ -2958,6 +3012,8 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       } else if (msg.kind === 'met') {
         setStatus('');
         addSysChip(`🎯 Goal met — ${msg.reason ?? 'done'}`);
+      } else if (msg.kind === 'updated') {
+        addSysChip(`\u{1F3AF} Goal updated — ${msg.reason ?? ''}`);
       } else if (msg.kind === 'stopped') {
         setStatus('');
         const why = msg.why === 'stalled' ? 'no progress across several rounds' : 'iteration cap reached';

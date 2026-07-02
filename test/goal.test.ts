@@ -5,10 +5,12 @@ import {
   Goal,
   buildContinuePrompt,
   buildJudgePrompt,
+  buildRevisionPrompt,
   decideNext,
   isStalled,
   newGoal,
   parseJudgeVerdict,
+  parseRevisionVerdict,
 } from '../src/core/goal';
 
 // ---- parseJudgeVerdict ---------------------------------------------------
@@ -126,4 +128,78 @@ test('buildContinuePrompt: includes the goal + the missing reason and says conti
   assert.match(p, /add dark mode/);
   assert.match(p, /toggle not wired/);
   assert.match(p, /[Cc]ontinue/);
+});
+
+// ---- parseRevisionVerdict --------------------------------------------------
+
+const GOAL = 'add dark mode to the settings page';
+
+test('parseRevisionVerdict: REVISE with the objective on the next line', () => {
+  const v = parseRevisionVerdict('REVISE\nAdd dark mode to the settings page and persist the choice.', GOAL);
+  assert.equal(v.revise, true);
+  assert.match(v.objective!, /persist the choice/);
+});
+
+test('parseRevisionVerdict: "REVISE: <objective>" on one line', () => {
+  const v = parseRevisionVerdict('REVISE: add dark AND light mode toggles', GOAL);
+  assert.equal(v.revise, true);
+  assert.equal(v.objective, 'add dark AND light mode toggles');
+});
+
+test('parseRevisionVerdict: KEEP means no change', () => {
+  assert.equal(parseRevisionVerdict('KEEP', GOAL).revise, false);
+  assert.equal(parseRevisionVerdict('keep — just a question about approach', GOAL).revise, false);
+});
+
+test('parseRevisionVerdict: unparseable / empty defaults to keep (safer)', () => {
+  assert.equal(parseRevisionVerdict('', GOAL).revise, false);
+  assert.equal(parseRevisionVerdict('hard to say what they meant', GOAL).revise, false);
+});
+
+test('parseRevisionVerdict: a line-start "KEEP or REVISE" echo is not an answer', () => {
+  const v = parseRevisionVerdict('KEEP or REVISE?\nREVISE\nAlso support high-contrast themes.', GOAL);
+  assert.equal(v.revise, true);
+  assert.match(v.objective!, /high-contrast/);
+});
+
+test('parseRevisionVerdict: mid-line instruction echo loses to the answer line', () => {
+  const v = parseRevisionVerdict(
+    'The instruction says to answer KEEP or REVISE.\nREVISE\nAdd dark mode plus a theme picker.',
+    GOAL,
+  );
+  assert.equal(v.revise, true);
+  assert.match(v.objective!, /theme picker/);
+});
+
+test('parseRevisionVerdict: an objective containing the word "keep" still revises', () => {
+  const v = parseRevisionVerdict('REVISE\nAdd dark mode and keep the existing light theme as default.', GOAL);
+  assert.equal(v.revise, true);
+  assert.match(v.objective!, /keep the existing light theme/);
+});
+
+test('parseRevisionVerdict: uppercase token mid-line works as a fallback', () => {
+  const v = parseRevisionVerdict('Verdict: REVISE — add dark mode and log the toggle usage', GOAL);
+  assert.equal(v.revise, true);
+  assert.match(v.objective!, /log the toggle usage/);
+});
+
+test('parseRevisionVerdict: REVISE with no objective text is treated as keep', () => {
+  assert.equal(parseRevisionVerdict('REVISE', GOAL).revise, false);
+});
+
+test('parseRevisionVerdict: a "revised" objective identical to the current one is keep', () => {
+  assert.equal(parseRevisionVerdict(`REVISE\n${GOAL.toUpperCase()}.`, GOAL).revise, false);
+});
+
+test('parseRevisionVerdict: caps a runaway objective length', () => {
+  const v = parseRevisionVerdict('REVISE\n' + 'y'.repeat(2000), GOAL);
+  assert.equal(v.revise, true);
+  assert.ok(v.objective!.length <= 400);
+});
+
+test('buildRevisionPrompt: includes goal + message and asks for KEEP/REVISE', () => {
+  const p = buildRevisionPrompt(GOAL, 'actually also add a high-contrast theme');
+  assert.match(p, /add dark mode to the settings page/);
+  assert.match(p, /high-contrast theme/);
+  assert.match(p, /KEEP or REVISE/);
 });

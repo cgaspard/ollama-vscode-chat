@@ -143,3 +143,88 @@ export function buildContinuePrompt(objective: string, reason: string): string {
     `confirmation; take the next concrete step.`
   );
 }
+
+// ---------------------------------------------------------------------------
+// Goal revision — while a goal is set, each message the user types is checked
+// (by the same local model, in a throwaway session) for whether it changes WHAT
+// the goal is. If it does, the user must confirm before the objective changes;
+// the judge would otherwise keep ruling against a stale objective.
+
+export interface RevisionVerdict {
+  revise: boolean;
+  /** The full revised objective, only when revise is true. */
+  objective?: string;
+}
+
+/** Normalize an objective for did-it-really-change comparison. */
+function normalizeObjective(o: string): string {
+  return o.toLowerCase().replace(/\s+/g, ' ').replace(/[.!]+$/, '').trim();
+}
+
+/** The prompt for the isolated revision-check session. Kept here so it's testable. */
+export function buildRevisionPrompt(currentObjective: string, userMessage: string): string {
+  return (
+    `An autonomous coding agent is pursuing this goal:\n\n` +
+    `CURRENT GOAL:\n${currentObjective}\n\n` +
+    `While it works, the user sent the agent this message:\n\n` +
+    `USER MESSAGE:\n${userMessage}\n\n` +
+    `Decide whether the message changes WHAT the goal is — it adds, removes, or ` +
+    `alters the required end state. Questions, encouragement, corrections of ` +
+    `approach, or guidance about HOW to work do NOT change the goal.\n\n` +
+    `Answer on the FIRST line with exactly one token: KEEP or REVISE.\n` +
+    `If REVISE, write the complete revised goal on the next line — one ` +
+    `self-contained sentence folding the user's change into the current goal. ` +
+    `Do not explain or restate anything else.`
+  );
+}
+
+/**
+ * Parse the revision-check reply. Prefer the first LINE that starts with a
+ * verdict token: instruction echoes ("answer KEEP or REVISE") sit mid-line, and
+ * everything after the real answer line is payload (a revised objective may
+ * itself legitimately start with "Keep …"). A line-start "KEEP or REVISE" echo
+ * is skipped too. Defaults to KEEP on anything unparseable — a goal must never
+ * change on ambiguous output — and a "revised" objective that matches the
+ * current one counts as KEEP.
+ */
+export function parseRevisionVerdict(raw: string, currentObjective: string): RevisionVerdict {
+  const text = (raw ?? '').trim();
+  if (!text) {
+    return { revise: false };
+  }
+  const lines = text.split('\n');
+  let token: string | null = null;
+  let rest = '';
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*(REVISE|KEEP)\b(.*)$/i.exec(lines[i]);
+    if (m && !/^\s*or\b/i.test(m[2])) {
+      token = m[1].toUpperCase();
+      rest = [m[2], ...lines.slice(i + 1)].join('\n');
+      break;
+    }
+  }
+  if (!token) {
+    // Fallback: an UPPERCASE token anywhere, last one wins ("Verdict: REVISE — …").
+    const re = /\b(REVISE|KEEP)\b/g;
+    let last: RegExpExecArray | null = null;
+    for (let m = re.exec(text); m; m = re.exec(text)) {
+      last = m;
+    }
+    if (!last) {
+      return { revise: false };
+    }
+    token = last[1];
+    rest = text.slice(last.index + last[0].length);
+  }
+  if (token !== 'REVISE') {
+    return { revise: false };
+  }
+  // The revised objective: the first non-empty line after the token.
+  const objective = (rest.replace(/^[:\s.—–-]+/, '').split('\n').map((l) => l.trim()).find(Boolean) ?? '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 400);
+  if (!objective || normalizeObjective(objective) === normalizeObjective(currentObjective)) {
+    return { revise: false };
+  }
+  return { revise: true, objective };
+}

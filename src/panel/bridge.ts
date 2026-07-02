@@ -8,9 +8,11 @@ import {
   Goal,
   buildContinuePrompt,
   buildJudgePrompt,
+  buildRevisionPrompt,
   decideNext,
   newGoal,
   parseJudgeVerdict,
+  parseRevisionVerdict,
 } from '../core/goal';
 import { clampKeepAlive } from '../core/keepAlive';
 import { humanizeError } from '../core/errors';
@@ -74,6 +76,8 @@ export class ChatBridge {
   private activeGoal: (Goal & { startedAt: number; paused: boolean }) | null = null;
   /** True while a judge check is in flight (prevents concurrent checks). */
   private goalChecking = false;
+  /** True while a goal-revision check is in flight (prevents concurrent checks). */
+  private revisionChecking = false;
   /** Last time the loop advanced — drives the health-tick watchdog. */
   private lastGoalActivity = 0;
   private activeFile: { abs: string; rel: string; chars: number } | null = null;
@@ -278,6 +282,10 @@ export class ChatBridge {
           await this.init();
           break;
         case 'send':
+          // While a goal is set, quietly check (in the background — the send
+          // must not wait on the local model) whether this message changes the
+          // goal; if so the user gets a confirm card before it actually does.
+          this.maybeOfferGoalRevision(msg.text);
           await this.handleSend(
             msg.text,
             msg.thinking,
@@ -412,6 +420,22 @@ export class ChatBridge {
         case 'setGoal':
           await this.setGoal(msg.objective);
           break;
+        case 'updateGoal': {
+          // A confirmed revision: swap the objective in place. The revised goal
+          // gets a fresh iteration budget, and old stall reasons no longer
+          // apply; elapsed time and paused state carry over.
+          const g = this.activeGoal;
+          const obj = msg.objective.trim();
+          if (g && obj) {
+            g.objective = obj;
+            g.iteration = 0;
+            g.recentReasons = [];
+            this.lastGoalActivity = Date.now();
+            this.postGoal();
+            this.post({ type: 'goalEvent', kind: 'updated', reason: obj });
+          }
+          break;
+        }
         case 'pauseGoal':
           if (this.activeGoal) {
             this.activeGoal.paused = true;
@@ -868,43 +892,97 @@ export class ChatBridge {
     objective: string,
     transcript: string,
   ): Promise<{ met: boolean; reason: string }> {
+    const reply = await this.askThrowaway(
+      'goal-judge',
+      buildJudgePrompt(objective, transcript),
+      'You are a strict goal-completion judge. Answer directly and concisely. ' +
+        'Do not produce chain-of-thought.',
+    );
+    if (!reply.trim()) {
+      return { met: false, reason: 'judge timed out' };
+    }
+    return parseJudgeVerdict(reply);
+  }
+
+  /**
+   * Ask the current model one question in an isolated throwaway session and
+   * return its raw reply text ('' on timeout or disposal). The session never
+   * touches chat history — it is always deleted afterwards.
+   */
+  private async askThrowaway(title: string, prompt: string, system: string): Promise<string> {
     const client = this.client!;
-    const judge = await client.createSession('goal-judge');
+    const session = await client.createSession(title);
     try {
-      let prompt = buildJudgePrompt(objective, transcript);
+      let text = prompt;
       if (/qwen/i.test(this.currentModel!)) {
-        prompt += '\n\n/no_think'; // qwen soft-switch: skip <think> for a fast verdict
+        text += '\n\n/no_think'; // qwen soft-switch: skip <think> for a fast verdict
       }
-      await client.promptAsync(judge.id, {
+      await client.promptAsync(session.id, {
         model: { providerID: 'ollama', modelID: this.currentModel! },
-        system:
-          'You are a strict goal-completion judge. Answer directly and concisely. ' +
-          'Do not produce chain-of-thought.',
-        parts: [{ type: 'text', text: prompt }],
+        system,
+        parts: [{ type: 'text', text }],
       });
       // Poll for the completed assistant reply (local models can be slow).
       const deadline = Date.now() + 120_000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         if (this.disposed) {
-          return { met: false, reason: 'disposed' };
+          return '';
         }
-        const msgs = await client.getMessages(judge.id);
+        const msgs = await client.getMessages(session.id);
         const done = [...msgs]
           .reverse()
           .find((m) => m.info.role === 'assistant' && m.info.time?.completed);
         if (done) {
-          const text = (done.parts ?? [])
+          return (done.parts ?? [])
             .filter((p): p is Extract<typeof p, { type: 'text' }> => p.type === 'text')
             .map((p) => (p as { text?: string }).text ?? '')
             .join('\n');
-          return parseJudgeVerdict(text);
         }
       }
-      return { met: false, reason: 'judge timed out' };
+      return '';
     } finally {
-      void client.deleteSession(judge.id).catch(() => undefined);
+      void client.deleteSession(session.id).catch(() => undefined);
     }
+  }
+
+  /**
+   * While a goal is set, ask the model whether a message the user just typed
+   * changes the goal itself. If it does, offer the revised objective for
+   * confirmation — the goal only changes when the user accepts (updateGoal).
+   * Fire-and-forget: the message already went to the agent as a send/steer.
+   */
+  private maybeOfferGoalRevision(text: string): void {
+    const goal = this.activeGoal;
+    const trimmed = (text ?? '').trim();
+    if (!goal || this.revisionChecking || !this.client || !this.currentModel) {
+      return;
+    }
+    // Slash commands and trivial acks ("ok", "go") can't redefine a goal.
+    if (!trimmed || trimmed.startsWith('/') || trimmed.length < 4) {
+      return;
+    }
+    this.revisionChecking = true;
+    void (async () => {
+      try {
+        const reply = await this.askThrowaway(
+          'goal-revise',
+          buildRevisionPrompt(goal.objective, trimmed),
+          'You decide whether a user message changes an agent\'s goal. ' +
+            'Answer directly and concisely. Do not produce chain-of-thought.',
+        );
+        const verdict = parseRevisionVerdict(reply, goal.objective);
+        // The goal may have been cleared or replaced while the model thought.
+        if (!verdict.revise || !verdict.objective || this.activeGoal !== goal) {
+          return;
+        }
+        this.post({ type: 'goalRevision', proposed: verdict.objective });
+      } catch (err) {
+        logError('goal revision check failed', err);
+      } finally {
+        this.revisionChecking = false;
+      }
+    })();
   }
 
   /** The tail of the conversation, as plain text for the judge (~4k chars). */

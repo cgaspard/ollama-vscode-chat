@@ -130,11 +130,15 @@ export type HostToWebview =
   // Loop lifecycle notices: judging, auto-continued, met, or stopped (with why).
   | {
       type: 'goalEvent';
-      kind: 'checking' | 'continued' | 'met' | 'stopped';
+      kind: 'checking' | 'continued' | 'met' | 'stopped' | 'updated';
       reason?: string;
       iteration?: number;
       why?: 'max-iterations' | 'stalled';
     }
+  // A message the user typed looks like it changes the active goal; `proposed`
+  // is the model's revised objective. The goal only changes if the user
+  // confirms (which sends `updateGoal` back).
+  | { type: 'goalRevision'; proposed: string }
   | { type: 'error'; message: string };
 
 // ---- Webview -> Host -----------------------------------------------------
@@ -187,6 +191,8 @@ export type WebviewToHost =
   | { type: 'runCommand'; command: string; arguments?: string }
   // Goal loop controls (the /goal command + the pinned bar's buttons).
   | { type: 'setGoal'; objective: string }
+  // Confirmed goal revision: replace the objective, keep the goal running.
+  | { type: 'updateGoal'; objective: string }
   | { type: 'pauseGoal' }
   | { type: 'resumeGoal' }
   | { type: 'clearGoal' }
