@@ -218,7 +218,7 @@ export class OpencodeServerManager {
     } catch (err) {
       logError('could not create opencode data dir', err);
     }
-    return {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       OPENCODE_CONFIG_CONTENT: configContent,
       // Point OpenCode's native ollama provider at the active server.
@@ -235,6 +235,12 @@ export class OpencodeServerManager {
       XDG_CACHE_HOME: sub('cache'),
       XDG_STATE_HOME: sub('state'),
     };
+    // A user-exported OPENCODE_SERVER_PASSWORD (for their own remote OpenCode)
+    // would make our managed server demand basic auth — and this extension is
+    // its only client and sends none, so every request would 401. The server
+    // is loopback-only with isolated state; it must never be password-gated.
+    delete env.OPENCODE_SERVER_PASSWORD;
+    return env;
   }
 
   /** Build the OPENCODE_CONFIG_CONTENT JSON injecting the Ollama provider. */

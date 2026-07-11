@@ -1,0 +1,12 @@
+version: 0.9.0
+date: 2026-07-11
+highlights:
+  - Bundled OpenCode upgraded 1.16.2 → 1.17.18 — 19 upstream releases of agent fixes and groundwork for upcoming features (checkpoints/revert, session diff), verified end-to-end against local Ollama models with zero changes to existing behavior.
+added: []
+changed:
+  - The bundled OpenCode server is now 1.17.18. Every feature surface was verified against the new server — streaming, reasoning blocks, tool calls, permission prompts, questions, /compact summarization, /mcp, /skills, session history, mid-generation steering, and goal loops all behave exactly as before.
+  - Existing chat sessions carry over — OpenCode 1.17 migrates its session store (now SQLite) in place on first launch; old sessions list, open, and resume normally.
+  - MCP servers configured with a working directory now actually run in it — older OpenCode silently ignored a local server's cwd; 1.17 honors it. If one of your MCP servers declares a cwd and relied on it being ignored, it will now start there.
+fixed:
+  - A user-exported OPENCODE_SERVER_PASSWORD environment variable no longer breaks the extension — the managed local server previously inherited it and demanded auth the extension never sends. The variable is now stripped for the embedded server (your own OpenCode installs are unaffected).
+removed: []
