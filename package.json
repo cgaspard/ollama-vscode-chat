@@ -2,7 +2,7 @@
   "name": "ollama-code",
   "displayName": "Ollama Code",
   "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
-  "version": "0.9.0",
+  "version": "0.11.0",
   "publisher": "cgaspard",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -148,6 +148,13 @@
           "type": "string",
           "default": "30m",
           "description": "Default Ollama keep_alive — how long a model stays loaded after use. Use a duration like '5m', '30m', '1h', '8760h' (~forever), or '0' to unload after each use. Also settable per session from the model menu."
+        },
+        "ollamaCode.healthCheckSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 5,
+          "maximum": 120,
+          "description": "How often (seconds) to check that Ollama is reachable and refresh model state while connected. While disconnected the extension retries every 5 seconds regardless, and the model list refreshes immediately whenever the model picker is open. Capped at 120 so the keep-warm ping always lands within the 5-minute minimum keep_alive. Takes effect within one poll cycle."
         },
         "ollamaCode.mcpServers": {
           "type": "object",

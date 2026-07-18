@@ -17,19 +17,33 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
+      channel: ${{ steps.ver.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version from tag
+      - name: Resolve version + channel from tag
         id: ver
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Channel policy (VS Code Marketplace pre-release convention):
+          #   - a -suffix tag (v1.2.3-rc.1) is a GitHub-only draft: never
+          #     published to the Marketplace (it can't be — Marketplace
+          #     versions must be plain x.y.z)
+          #   - ODD minor  (v0.11.0) -> Marketplace PRE-RELEASE (beta channel;
+          #     users opt in via "Switch to Pre-Release Version")
+          #   - EVEN minor (v0.12.0) -> Marketplace stable
+          MINOR=$(echo "$VERSION" | cut -d. -f2 | cut -d- -f1)
           if [[ "$VERSION" == *-* ]]; then
+            echo "channel=none" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [ $((MINOR % 2)) -eq 1 ]; then
+            echo "channel=prerelease" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -104,7 +118,11 @@ jobs:
       - name: Package ${{ matrix.target }} .vsix
         run: |
           VER="${{ needs.prepare.outputs.version }}"
-          npx vsce package --target ${{ matrix.target }} --out "ollama-code-${{ matrix.target }}-${VER}.vsix"
+          PRE=""
+          if [ "${{ needs.prepare.outputs.channel }}" = "prerelease" ]; then
+            PRE="--pre-release"
+          fi
+          npx vsce package $PRE --target ${{ matrix.target }} --out "ollama-code-${{ matrix.target }}-${VER}.vsix"
           # Stable versionless per-platform mirror for predictable download URLs.
           cp "ollama-code-${{ matrix.target }}-${VER}.vsix" "ollama-code-${{ matrix.target }}.vsix"
 
@@ -130,10 +148,11 @@ jobs:
             ollama-code-${{ matrix.target }}.vsix
 
       # Publish the exact .vsix attached to the Release so the two artifacts are
-      # byte-identical. Skipped for pre-release tags (e.g. v0.1.0-rc.1).
+      # byte-identical. Odd-minor versions go to the Marketplace's PRE-RELEASE
+      # (beta) channel; -suffix tags (e.g. v0.1.0-rc.1) stay GitHub-only.
       # Requires a VSCE_PAT secret (Marketplace > Manage scope).
-      - name: Publish ${{ matrix.target }} to VS Code Marketplace
-        if: ${{ needs.prepare.outputs.prerelease == 'false' }}
+      - name: Publish ${{ matrix.target }} to VS Code Marketplace (${{ needs.prepare.outputs.channel }})
+        if: ${{ needs.prepare.outputs.channel != 'none' }}
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
@@ -142,4 +161,8 @@ jobs:
             exit 1
           fi
           VER="${{ needs.prepare.outputs.version }}"
-          npx vsce publish --packagePath "ollama-code-${{ matrix.target }}-${VER}.vsix"
+          PRE=""
+          if [ "${{ needs.prepare.outputs.channel }}" = "prerelease" ]; then
+            PRE="--pre-release"
+          fi
+          npx vsce publish $PRE --packagePath "ollama-code-${{ matrix.target }}-${VER}.vsix"

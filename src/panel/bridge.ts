@@ -16,6 +16,7 @@ import {
 } from '../core/goal';
 import { clampKeepAlive } from '../core/keepAlive';
 import { humanizeError } from '../core/errors';
+import { ProbeStatus } from '../core/health';
 import { pickModel } from '../core/models';
 import { selectionLabel } from '../core/selection';
 import { emptySessionCandidates } from '../core/sessions';
@@ -50,6 +51,31 @@ export interface BridgeDeps {
 
 /** globalState flag: the one-time empty-session migration has already run. */
 const PRUNED_EMPTIES_KEY = 'ollamaCode.prunedEmptySessions';
+
+/**
+ * Health poll cadence while disconnected (ms). Kept fast so a restarted Ollama
+ * is picked up promptly; the *connected* cadence is the configurable
+ * `ollamaCode.healthCheckSeconds` (default 30s) — a healthy idle panel
+ * shouldn't flood Ollama's server log with queries (LM Studio Code issue #7).
+ */
+const OFFLINE_HEALTH_INTERVAL_MS = 5000;
+/** Refresh the model list every N health ticks while connected. */
+const REFRESH_EVERY_TICKS = 3;
+/** Fast model-list refresh cadence while the model picker is open (ms). */
+const PICKER_REFRESH_MS = 4000;
+/**
+ * Consecutive probe timeouts before we believe Ollama is gone. A single slow
+ * probe (server saturated mid-generation or mid-load) must not pop the offline
+ * banner; a refused connection still flips immediately.
+ */
+const OFFLINE_AFTER_TIMEOUTS = 3;
+/**
+ * Keep-warm cadence (ms): re-assert keep_alive on the selected model this
+ * often, independent of the model-list refresh. Must stay comfortably under
+ * MIN_KEEP_ALIVE_SECONDS (5 min) or the model unloads between pings — this is
+ * also why healthCheckSeconds is clamped to at most 120s.
+ */
+const KEEP_WARM_EVERY_MS = 120_000;
 
 /**
  * Connects one webview (sidebar view or editor tab) to the OpenCode server.
@@ -96,6 +122,18 @@ export class ChatBridge {
   private messageSub: vscode.Disposable | undefined;
   private healthTimer: ReturnType<typeof setInterval> | undefined;
   private healthTicks = 0;
+  /** Next wall-clock time (ms) the upstream probe is due; 0 = due now. */
+  private nextProbeDueAt = 0;
+  /** Consecutive health-probe timeouts (see OFFLINE_AFTER_TIMEOUTS). */
+  private timeoutStreak = 0;
+  /** Last time keep_alive was re-asserted on the selected model. */
+  private lastKeepWarmAt = 0;
+  /** Fast refresh loop while the webview's model picker is open. */
+  private pickerTimer: ReturnType<typeof setInterval> | undefined;
+  /** Whether this webview is currently visible (hidden panels stay alive). */
+  private visible = true;
+  /** JSON of the last 'models' payload posted — suppresses no-op refreshes. */
+  private lastPostedModelsJson = '';
   private titleSink: ((t: string) => void) | undefined;
   /** Model ids with a load currently in flight → cancel handle. While any load
    * is in flight the keep-warm refresh is paused (it would contend with the
@@ -131,56 +169,124 @@ export class ChatBridge {
       clearInterval(this.healthTimer);
       this.healthTimer = undefined;
     }
+    if (this.pickerTimer) {
+      clearInterval(this.pickerTimer);
+      this.pickerTimer = undefined;
+    }
+  }
+
+  /** The connected-state poll cadence (ms), from user settings. */
+  private healthIntervalMs(): number {
+    return getConfig().healthCheckSeconds * 1000;
   }
 
   /**
    * Poll Ollama so the panel self-heals: when the server comes online after
    * being down we auto-connect (no manual Retry), and while connected we
    * periodically refresh the model list so newly loaded/pulled models appear.
+   *
+   * The timer is a fixed 5s metronome that only PROBES when due: every tick
+   * while disconnected, every healthCheckSeconds while connected. A fixed
+   * interval (rather than a rescheduled timeout) survives a tick that throws,
+   * and reacts within 5s when some out-of-tick path flips us offline —
+   * postServers(false) resets the due time. Config changes take effect on the
+   * next due probe.
    */
   private startHealthPoll(): void {
     if (this.healthTimer || this.disposed) {
       return;
     }
-    this.healthTimer = setInterval(async () => {
-      if (this.disposed || this.connecting) {
-        return;
-      }
-      let ok = false;
+    this.healthTimer = setInterval(() => void this.runHealthTick(), OFFLINE_HEALTH_INTERVAL_MS);
+  }
+
+  private async runHealthTick(): Promise<void> {
+    if (this.disposed || this.connecting) {
+      return;
+    }
+    if (Date.now() >= this.nextProbeDueAt) {
+      const started = Date.now();
       try {
-        ok = await this.deps.ollama.checkConnection();
-      } catch {
-        ok = false;
+        await this.probeAndHeal();
+      } finally {
+        // While disconnected the next metronome tick (5s) probes again; while
+        // connected wait out the configured cadence. Anchor to the tick START
+        // (minus slack for timer drift) — anchoring to completion would push
+        // the due time past the next tick whenever the cadence equals the
+        // metronome period, silently halving the probe rate.
+        this.nextProbeDueAt = this.connected ? started + this.healthIntervalMs() - 500 : 0;
       }
-      if (ok && !this.connected) {
-        await this.init(); // came online → full setup + model load
-      } else if (ok && this.connected) {
-        // Pause the model refresh + keep-warm while a load is in flight: the
-        // server is busy loading (possibly for minutes) and an extra listModels
-        // (/api/ps + parallel /api/show) would contend with — and can stall —
-        // the load. The load's own readiness poll drives state meanwhile.
-        if (this.loadsInFlight.size === 0 && ++this.healthTicks % 3 === 0) {
-          const list = await this.refreshModelsToWebview().catch(() => [] as OllamaModel[]); // ~every 15s
-          await this.keepWarm(list).catch(() => undefined);
+    }
+    // Goal watchdog ("wake up on occasion"): if the loop lost its idle signal
+    // (e.g. an error swallowed the event) re-check once things are quiet.
+    if (
+      this.activeGoal &&
+      !this.activeGoal.paused &&
+      !this.goalChecking &&
+      Date.now() - this.lastGoalActivity > 120_000
+    ) {
+      this.lastGoalActivity = Date.now(); // back off between watchdog retries
+      if (!(await this.isSessionBusy())) {
+        void this.runGoalCheck();
+      }
+    }
+  }
+
+  private async probeAndHeal(): Promise<void> {
+    // Share one probe across all panels' ticks (they use this same client):
+    // a result younger than ~80% of the cadence IN EFFECT is fresh enough to
+    // reuse — while disconnected that cadence is the fast 5s one, so a
+    // restarted Ollama really is noticed within ~5s.
+    const cadence = this.connected ? this.healthIntervalMs() : OFFLINE_HEALTH_INTERVAL_MS;
+    let status: ProbeStatus = 'unreachable';
+    try {
+      status = await this.deps.ollama.probeHealth(Math.floor(cadence * 0.8));
+    } catch {
+      status = 'unreachable';
+    }
+    this.timeoutStreak = status === 'timeout' ? this.timeoutStreak + 1 : 0;
+    if (status === 'ok' && !this.connected) {
+      await this.init(); // came online → full setup + model load
+    } else if (status === 'ok' && this.connected) {
+      // Pause the model refresh + keep-warm while a load is in flight: the
+      // server is busy loading (possibly for minutes) and an extra listModels
+      // (/api/ps + parallel /api/show) would contend with — and can stall —
+      // the load. The load's own readiness poll drives state meanwhile.
+      if (this.loadsInFlight.size === 0) {
+        if (++this.healthTicks % REFRESH_EVERY_TICKS === 0) {
+          await this.refreshModelsToWebview('periodic').catch(() => undefined);
         }
-      } else if (!ok && this.connected) {
+        // Keep-warm runs on its own wall-clock cadence, decoupled from the
+        // (slower, visibility-gated) model refresh: keep_alive must be
+        // re-asserted well within its 5-minute minimum even for hidden panels.
+        if (Date.now() - this.lastKeepWarmAt >= KEEP_WARM_EVERY_MS) {
+          this.lastKeepWarmAt = Date.now();
+          await this.keepWarmNow().catch(() => undefined);
+        }
+      }
+    } else if (status !== 'ok' && this.connected) {
+      // A refused connection means Ollama really is gone — flip immediately.
+      // A timeout just means it's slow (loading/generating): tolerate a streak
+      // before showing the offline banner (LM Studio Code issue #7).
+      if (status !== 'timeout' || this.timeoutStreak >= OFFLINE_AFTER_TIMEOUTS) {
         this.connected = false;
         this.postServers(false); // went offline → show the banner
       }
-      // Goal watchdog ("wake up on occasion"): if the loop lost its idle signal
-      // (e.g. an error swallowed the event) re-check once things are quiet.
-      if (
-        this.activeGoal &&
-        !this.activeGoal.paused &&
-        !this.goalChecking &&
-        Date.now() - this.lastGoalActivity > 120_000
-      ) {
-        this.lastGoalActivity = Date.now(); // back off between watchdog retries
-        if (!(await this.isSessionBusy())) {
-          void this.runGoalCheck();
-        }
-      }
-    }, 5000);
+    }
+  }
+
+  /**
+   * Visibility changed (sidebar collapsed, tab moved to background). Hidden
+   * panels keep their slow self-heal poll and keep-warm duty but skip model
+   * refreshes; on becoming visible again, catch up immediately.
+   */
+  setVisible(visible: boolean): void {
+    if (visible === this.visible) {
+      return;
+    }
+    this.visible = visible;
+    if (visible && this.connected) {
+      void this.refreshModelsToWebview('periodic').catch(() => undefined);
+    }
   }
 
   private updateActiveFile(editor: vscode.TextEditor | undefined): void {
@@ -279,6 +385,10 @@ export class ChatBridge {
     try {
       switch (msg.type) {
         case 'ready':
+          // A fresh webview always starts with the picker closed — stop any
+          // fast-poll loop a previous webview incarnation left running (iframe
+          // reloads never send modelMenu open:false).
+          this.setModelMenuOpen(false);
           await this.init();
           break;
         case 'send':
@@ -323,6 +433,9 @@ export class ChatBridge {
           break;
         case 'refreshModels':
           await this.refreshModelsToWebview();
+          break;
+        case 'modelMenu':
+          this.setModelMenuOpen(msg.open);
           break;
         case 'listServers':
           this.postServers(this.connected);
@@ -485,6 +598,10 @@ export class ChatBridge {
 
     // Offline: show the connection screen and wait for retry / switch.
     if (!this.connected) {
+      // The webview now shows models: [] — resync the periodic diff-guard so
+      // the next healthy refresh always posts (a stale healthy snapshot here
+      // would suppress it and freeze the picker on "No models found").
+      this.lastPostedModelsJson = '';
       this.post({
         type: 'init',
         models: [],
@@ -507,6 +624,7 @@ export class ChatBridge {
     } catch (err) {
       const message = humanizeError(err, { subject: 'the OpenCode server' });
       this.post({ type: 'error', message });
+      this.lastPostedModelsJson = ''; // webview shows models: [] — resync diff-guard
       this.post({
         type: 'init',
         models: [],
@@ -524,11 +642,15 @@ export class ChatBridge {
 
     const models = await this.loadModels();
     const stored = this.deps.context.workspaceState.get<string>('ollamaCode.model');
+    // The live in-session selection wins over configuration: a self-heal
+    // reconnect mid-conversation must never silently switch the user's model
+    // back to defaultModel. defaultModel only decides on a fresh panel.
     this.currentModel =
-      pickModel([cfg.defaultModel, stored ?? '', this.currentModel ?? ''], models) ?? null;
+      pickModel([this.currentModel ?? '', cfg.defaultModel, stored ?? ''], models) ?? null;
 
     this.startEventStream();
 
+    this.lastPostedModelsJson = JSON.stringify({ models, currentModel: this.currentModel });
     this.post({
       type: 'init',
       models,
@@ -1024,6 +1146,12 @@ export class ChatBridge {
 
   private postServers(connected: boolean): void {
     this.connected = connected;
+    if (!connected) {
+      // Some flips to offline happen outside a health tick (a failed send's
+      // reconnect, switching to a dead server) — make the next 5s metronome
+      // tick probe immediately instead of waiting out the connected cadence.
+      this.nextProbeDueAt = 0;
+    }
     this.post({
       type: 'servers',
       servers: this.deps.servers.list().map((s) => ({ id: s.id, name: s.name, url: s.url })),
@@ -1060,44 +1188,82 @@ export class ChatBridge {
     await this.init();
   }
 
-  private async refreshModelsToWebview(): Promise<OllamaModel[]> {
+  /**
+   * Push a fresh model list to the webview.
+   *
+   * 'action' (user did something: load/eject/rescan/settings) always posts —
+   * the webview uses the reply to settle load state. 'periodic' (health
+   * cadence / picker loop / visibility catch-up) is best-effort: skipped while
+   * hidden or disconnected, and suppressed when nothing changed so the webview
+   * isn't re-rendered every cycle for no reason.
+   */
+  private async refreshModelsToWebview(reason: 'action' | 'periodic' = 'action'): Promise<OllamaModel[]> {
+    if (reason === 'periodic' && (!this.visible || !this.connected || this.loadsInFlight.size > 0)) {
+      // The loadsInFlight gate matters for the picker fast-poll especially:
+      // the menu stays open for the whole (possibly multi-minute) load, and an
+      // unpaused 4s /api/tags + /api/ps + N×/api/show fan-out would contend
+      // with — and can stall — the load (same reason the health tick pauses).
+      return [];
+    }
     const list = await this.deps.ollama.listModels();
     // A non-empty list is proof the server answered — if we were showing
     // offline, correct that immediately rather than waiting for the next poll.
     if (list.length) {
       this.noteOnline();
     }
-    this.post({ type: 'models', models: this.mapModels(list), currentModel: this.currentModel });
+    if (reason === 'periodic' && list.length === 0) {
+      // A transient listing failure surfaces as [] — never blank a populated
+      // picker from a background refresh; an 'action' post stays authoritative.
+      return list;
+    }
+    const payload = { models: this.mapModels(list), currentModel: this.currentModel };
+    const json = JSON.stringify(payload);
+    if (reason === 'periodic' && json === this.lastPostedModelsJson) {
+      return list;
+    }
+    this.lastPostedModelsJson = json;
+    this.post({ type: 'models', ...payload, reason });
     return list;
   }
 
+  /** The webview's model picker opened/closed: run a fast refresh loop while open. */
+  private setModelMenuOpen(open: boolean): void {
+    if (open) {
+      if (!this.pickerTimer && !this.disposed) {
+        void this.refreshModelsToWebview('periodic').catch(() => undefined);
+        this.pickerTimer = setInterval(
+          () => void this.refreshModelsToWebview('periodic').catch(() => undefined),
+          PICKER_REFRESH_MS,
+        );
+      }
+    } else if (this.pickerTimer) {
+      clearInterval(this.pickerTimer);
+      this.pickerTimer = undefined;
+    }
+  }
+
   /**
-   * Re-assert keep_alive on the currently-selected model if it's loaded.
-   * OpenCode's chat requests reset Ollama's keep_alive to its ~5min default, so
-   * without this the user's keepAlive choice wouldn't stick. Re-loading with the
-   * SAME num_ctx is a cheap no-op (just refreshes the timer).
+   * Re-assert keep_alive on the selected model via one cheap /api/ps lookup —
+   * no /api/tags, no /api/show fan-out. OpenCode's chat requests reset
+   * Ollama's keep_alive to its ~5min default, so without this ping the user's
+   * keepAlive choice wouldn't stick. Runs on its own cadence, including for
+   * hidden panels (a background chat must keep its model warm).
    *
-   * CRITICAL: we re-load with the model's ACTUALLY-LOADED context and nothing
-   * else. We must never pass a guessed/config context here — doing so (the old
-   * `|| ctxFor(...)` fallback) reloaded the model at a DIFFERENT context every
-   * 15s, which forced a full reload and stomped the user's chosen context (e.g.
-   * back to 256K). If /api/ps doesn't report the loaded context, we SKIP the
-   * refresh rather than risk changing it; the model keeps its own keep_alive.
+   * CRITICAL: the refresh call must use the model's ACTUALLY-LOADED context
+   * from /api/ps and nothing else — a guessed/config context would force a
+   * full reload and stomp the user's chosen context. Skips (never guesses)
+   * when the model isn't resident or ps doesn't report its context; pinging a
+   * model the user ejected elsewhere would resurrect it.
    */
-  private async keepWarm(list: OllamaModel[]): Promise<void> {
+  private async keepWarmNow(): Promise<void> {
     if (!this.currentModel) {
       return;
     }
-    const m = list.find((x) => x.id === this.currentModel);
-    if (!m || m.state !== 'loaded') {
+    const loadedCtx = await this.deps.ollama.loadedContextFor(this.currentModel);
+    if (!loadedCtx) {
       return;
     }
-    const loadedCtx = m.loadedContextLength;
-    if (!loadedCtx || loadedCtx <= 0) {
-      return; // unknown loaded context → don't touch it (would risk a reload)
-    }
-    // Bare timer refresh at the SAME context — no reload, no inference.
-    await this.deps.ollama.refreshKeepAlive(m.id, loadedCtx, this.keepAlive());
+    await this.deps.ollama.refreshKeepAlive(this.currentModel, loadedCtx, this.keepAlive());
   }
 
   /** Effective num_ctx for a model: per-model override, else the global default, clamped to the model's max. */
@@ -1262,8 +1428,10 @@ export class ChatBridge {
    */
   private async setKeepAlive(value: string): Promise<void> {
     await this.deps.prefs.setKeepAlive(value);
-    const list = await this.deps.ollama.listModels().catch(() => [] as OllamaModel[]);
-    await this.keepWarm(list).catch(() => undefined);
+    // One cheap /api/ps ping instead of a full listModels fan-out just to feed
+    // the old keepWarm(list) — the 'action' refresh below re-lists anyway.
+    this.lastKeepWarmAt = Date.now();
+    await this.keepWarmNow().catch(() => undefined);
     await this.refreshModelsToWebview();
   }
 
@@ -1605,8 +1773,7 @@ export class ChatBridge {
         log(`ensureContext: ${result.note}`);
       }
       if (result.reloaded) {
-        const models = await this.loadModels();
-        this.post({ type: 'models', models, currentModel: this.currentModel });
+        await this.refreshModelsToWebview('periodic').catch(() => undefined);
       }
       this.post({ type: 'status', text: '' });
     }

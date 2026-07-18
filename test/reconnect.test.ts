@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ProbeStatus } from '../src/core/health';
 import { ConnectResult, ReconnectEffects, SelfHealer } from '../src/core/reconnect';
 
 // A controllable harness: a fake clock plus call counters, so every self-heal
@@ -8,17 +9,25 @@ type Maybe<T> = T | (() => T);
 const val = <T>(v: Maybe<T>): T => (typeof v === 'function' ? (v as () => T)() : v);
 
 function harness(opts: {
+  /** Probe result; `reachable` shorthand maps true/false to ok/unreachable. */
+  probe?: Maybe<ProbeStatus>;
   reachable?: Maybe<boolean>;
   serverHealthy?: Maybe<boolean>;
   connected?: Maybe<boolean>;
   connectResult?: Maybe<ConnectResult>;
   refreshEvery?: number;
+  offlineAfterTimeouts?: number;
   start?: number;
 }) {
   const calls = { goOffline: 0, connect: 0, reloadModels: 0 };
   let clock = opts.start ?? 1000;
   const fx: ReconnectEffects = {
-    upstreamReachable: async () => val(opts.reachable ?? true),
+    probeUpstream: async () =>
+      opts.probe !== undefined
+        ? val(opts.probe)
+        : val(opts.reachable ?? true)
+          ? 'ok'
+          : 'unreachable',
     serverHealthy: () => val(opts.serverHealthy ?? true),
     isConnected: () => val(opts.connected ?? true),
     goOffline: () => void calls.goOffline++,
@@ -30,6 +39,7 @@ function harness(opts: {
   };
   const healer = new SelfHealer(fx, {
     refreshEvery: opts.refreshEvery ?? 3,
+    offlineAfterTimeouts: opts.offlineAfterTimeouts ?? 3,
     backoff: { base: 1000, factor: 2, max: 30000 },
     now: () => clock,
   });
@@ -124,7 +134,7 @@ test('an upstream-down reconnect applies no backoff (poll recovers for free)', a
 test('a connect() that throws is treated as a failure', async () => {
   const calls = { n: 0 };
   const fx: ReconnectEffects = {
-    upstreamReachable: async () => true,
+    probeUpstream: async () => 'ok',
     serverHealthy: () => false,
     isConnected: () => false,
     goOffline: () => {},
@@ -175,4 +185,47 @@ test('offline takes priority over the refresh cadence', async () => {
   await h.healer.tick();
   assert.equal(await h.healer.tick(), 'go-offline'); // tick 3 would refresh, but upstream is down
   assert.equal(h.calls.reloadModels, 0);
+});
+
+test('probe timeouts only flip offline after a consecutive streak', async () => {
+  // A saturated server (mid-generation) answers slowly; the banner must not
+  // pop on the first slow probe — that is the issue #7 "hiccup".
+  const h = harness({ probe: 'timeout', connected: true, offlineAfterTimeouts: 3 });
+  assert.equal(await h.healer.tick(), 'none'); // streak 1
+  assert.equal(await h.healer.tick(), 'none'); // streak 2
+  assert.equal(await h.healer.tick(), 'go-offline'); // streak 3
+  assert.equal(h.calls.goOffline, 1);
+});
+
+test('a successful probe resets the timeout streak', async () => {
+  const seq: ProbeStatus[] = ['timeout', 'timeout', 'ok', 'timeout', 'timeout'];
+  let i = 0;
+  const h = harness({ probe: () => seq[Math.min(i++, seq.length - 1)], connected: true, offlineAfterTimeouts: 3 });
+  await h.healer.tick(); // timeout, streak 1
+  await h.healer.tick(); // timeout, streak 2
+  await h.healer.tick(); // ok — streak resets
+  await h.healer.tick(); // timeout, streak 1 again
+  assert.equal(await h.healer.tick(), 'none'); // streak 2 — still online
+  assert.equal(h.calls.goOffline, 0);
+});
+
+test('a refused connection still flips offline immediately', async () => {
+  const h = harness({ probe: 'unreachable', connected: true });
+  assert.equal(await h.healer.tick(), 'go-offline');
+  assert.equal(h.calls.goOffline, 1);
+});
+
+test('a probe that throws counts as unreachable, not a timeout', async () => {
+  const fx: ReconnectEffects = {
+    probeUpstream: async () => {
+      throw new Error('boom');
+    },
+    serverHealthy: () => true,
+    isConnected: () => true,
+    goOffline: () => {},
+    connect: async () => 'connected',
+    reloadModels: async () => {},
+  };
+  const healer = new SelfHealer(fx, { now: () => 0 });
+  assert.equal(await healer.tick(), 'go-offline');
 });

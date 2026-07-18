@@ -40,6 +40,14 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 3. Click the Ollama icon in the Activity Bar.
 4. Pick a model, type a task, hit Enter.
 
+### Beta channel
+
+New features ship to the Marketplace **pre-release** channel first (odd minor
+versions, e.g. `0.11.x`; stable releases use even minors). To try betas, open
+the extension's Marketplace page in VS Code and click **Switch to Pre-Release
+Version** — VS Code updates you along the beta track and you can switch back
+any time with **Switch to Release Version**.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -52,6 +60,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 | `ollamaCode.autoEnsureContext` | `true` | Load the model with an adequate `num_ctx` before prompting |
 | `ollamaCode.minContextLength` | `32768` | Context window (`num_ctx`) to load models with |
 | `ollamaCode.keepAlive` | `30m` | Ollama `keep_alive` — how long a model stays loaded |
+| `ollamaCode.healthCheckSeconds` | `30` | Health/model poll cadence while connected (5–120; capped so the keep-warm ping fits inside the 5-minute minimum `keep_alive`). Disconnected retries stay at 5s; the model list refreshes immediately while the model picker is open |
 | `ollamaCode.mcpServers` | `{}` | MCP servers to expose to the agent (in addition to auto-discovered ones) |
 
 ## MCP servers

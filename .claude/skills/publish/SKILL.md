@@ -92,8 +92,12 @@ git push origin main
 git tag -a v<version> -m "v<version>"
 git push origin v<version>
 ```
-Pushing the tag is what deploys. A pre-release tag (contains `-`, e.g.
-`v0.3.0-rc.1`) creates a GitHub pre-release and **skips** the Marketplace publish.
+Pushing the tag is what deploys. Channel selection (see release.yml `prepare`):
+- **ODD minor** (`v0.11.0`) → Marketplace **pre-release** (beta channel; users
+  opt in via "Switch to Pre-Release Version"). GitHub Release marked pre-release.
+- **EVEN minor** (`v0.12.0`) → Marketplace stable.
+- A `-suffix` tag (`v0.3.0-rc.1`) creates a GitHub pre-release only and
+  **skips** the Marketplace entirely (Marketplace versions must be plain x.y.z).
 
 ### 7. Watch and verify
 ```bash

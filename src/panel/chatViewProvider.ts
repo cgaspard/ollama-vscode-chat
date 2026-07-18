@@ -66,6 +66,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     bridge.setTitleSink((t) => {
       view.title = t;
     });
+    // Hidden views keep running (retainContextWhenHidden) — tell the bridge so
+    // it can skip model refreshes while nobody is looking, and catch up on show.
+    bridge.setVisible(view.visible);
+    view.onDidChangeVisibility(() => bridge.setVisible(view.visible));
     view.onDidDispose(() => bridge.dispose());
   }
 
@@ -95,6 +99,8 @@ export function openChatPanel(extensionUri: vscode.Uri, deps: BridgeDeps): vscod
   bridge.setTitleSink((t) => {
     panel.title = t ? `Ollama · ${t}` : 'Ollama Code';
   });
+  bridge.setVisible(panel.visible);
+  panel.onDidChangeViewState(() => bridge.setVisible(panel.visible));
   panel.onDidDispose(() => bridge.dispose());
   return panel;
 }

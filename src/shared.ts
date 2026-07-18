@@ -88,7 +88,9 @@ export type HostToWebview =
       minContext: number;
       keepAlive: string;
     }
-  | { type: 'models'; models: UiModel[]; currentModel: string | null }
+  // reason 'action' = reply to something the user did (load/eject/rescan);
+  // 'periodic' = background refresh. Absent = 'action'.
+  | { type: 'models'; models: UiModel[]; currentModel: string | null; reason?: 'action' | 'periodic' }
   | { type: 'servers'; servers: UiServer[]; activeId: string; connected: boolean }
   | { type: 'sessions'; sessions: UiSession[]; currentSessionID: string | null }
   | { type: 'sessionLoaded'; sessionID: string; title: string; messages: MessageWithParts[] }
@@ -167,6 +169,8 @@ export type WebviewToHost =
   | { type: 'setModelCtxPref'; modelID: string; numCtx: number } // persist desired ctx only (no reload/rebuild)
   | { type: 'setKeepAlive'; value: string }
   | { type: 'refreshModels' }
+  // The model picker opened/closed — the host fast-polls the list while open.
+  | { type: 'modelMenu'; open: boolean }
   | { type: 'listServers' }
   | { type: 'addServer'; name: string; url: string }
   | { type: 'updateServer'; id: string; name: string; url: string }

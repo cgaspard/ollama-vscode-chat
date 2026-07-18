@@ -7,7 +7,7 @@
  * after a reconnect.
  */
 import { BackoffOptions, nextDelay } from './backoff';
-import { decideHealthAction, HealthAction } from './health';
+import { decideHealthAction, HealthAction, ProbeStatus } from './health';
 
 /**
  * Outcome of a connect attempt:
@@ -20,8 +20,8 @@ import { decideHealthAction, HealthAction } from './health';
 export type ConnectResult = 'connected' | 'upstream-down' | 'failed';
 
 export interface ReconnectEffects {
-  /** Is the upstream (LM Studio / Ollama) reachable right now? */
-  upstreamReachable(): Promise<boolean>;
+  /** Probe the upstream (LM Studio / Ollama); distinguishes timeout from refused. */
+  probeUpstream(): Promise<ProbeStatus>;
   /** Is the OpenCode server process alive AND do we hold a client for it? */
   serverHealthy(): boolean;
   /** Whether we currently consider ourselves connected. */
@@ -37,6 +37,8 @@ export interface ReconnectEffects {
 export interface ReconnectConfig {
   /** Refresh the model list every N healthy ticks (0 disables). */
   refreshEvery?: number;
+  /** Consecutive probe timeouts tolerated before going offline (default 3). */
+  offlineAfterTimeouts?: number;
   /** Backoff curve for failed reconnects. */
   backoff?: BackoffOptions;
   /** Injectable clock (defaults to Date.now) so tests are deterministic. */
@@ -47,6 +49,7 @@ export class SelfHealer {
   private attempts = 0;
   private nextAt = 0;
   private tickCount = 0;
+  private timeoutStreak = 0;
 
   constructor(
     private readonly fx: ReconnectEffects,
@@ -83,14 +86,17 @@ export class SelfHealer {
    * and apply the side-effect. Returns the action taken (handy for tests/logs).
    */
   async tick(): Promise<HealthAction> {
-    let reachable = false;
+    let status: ProbeStatus = 'unreachable';
     try {
-      reachable = await this.fx.upstreamReachable();
+      status = await this.fx.probeUpstream();
     } catch {
-      reachable = false;
+      status = 'unreachable';
     }
+    this.timeoutStreak = status === 'timeout' ? this.timeoutStreak + 1 : 0;
     const action = decideHealthAction({
-      lmStudioOk: reachable,
+      upstream: status,
+      timeoutStreak: this.timeoutStreak,
+      offlineAfterTimeouts: this.cfg.offlineAfterTimeouts ?? 3,
       connected: this.fx.isConnected(),
       serverHealthy: this.fx.serverHealthy(),
       now: this.now(),

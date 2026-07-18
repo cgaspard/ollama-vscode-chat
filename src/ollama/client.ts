@@ -1,5 +1,24 @@
 import { ollamaRestRoot } from '../config';
+import { ProbeStatus } from '../core/health';
 import { logError } from '../logger';
+
+/**
+ * Whether a fetch failure came from our own AbortSignal.timeout rather than a
+ * connection-level error. Undici surfaces the signal's DOMException directly
+ * (TimeoutError) or wrapped as the `cause` of a "fetch failed" TypeError.
+ */
+function isTimeoutError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+  const e = err as { name?: string; cause?: { name?: string } };
+  return (
+    e.name === 'TimeoutError' ||
+    e.name === 'AbortError' ||
+    e.cause?.name === 'TimeoutError' ||
+    e.cause?.name === 'AbortError'
+  );
+}
 
 export interface OllamaModel {
   id: string; // model name:tag, e.g. "llama3.2:1b"
@@ -22,9 +41,19 @@ const TIMEOUT = (ms: number) => AbortSignal.timeout(ms);
 
 /** Discovery + lifecycle helper for an Ollama server. */
 export class OllamaClient {
+  /** Cached probe result so sibling panels' health ticks share one request. */
+  private probe: { startedAt: number; promise: Promise<ProbeStatus> } | undefined;
+  /** In-flight model listing, shared by concurrent callers. */
+  private listing: Promise<OllamaModel[]> | undefined;
+
   constructor(private baseUrl: string) {}
 
   setBaseUrl(url: string): void {
+    if (url !== this.baseUrl) {
+      // A different server: forget everything we learned about the old one.
+      this.probe = undefined;
+      this.listing = undefined;
+    }
     this.baseUrl = url;
   }
   getBaseUrl(): string {
@@ -34,17 +63,83 @@ export class OllamaClient {
     return ollamaRestRoot(this.baseUrl);
   }
 
-  async checkConnection(): Promise<boolean> {
+  /**
+   * Probe the server via the tiny `/api/version` endpoint. 'timeout' means it
+   * didn't answer in time — a saturated server mid-generation or mid-load can
+   * look like this, so callers must not treat it as proof the server is gone.
+   * Deliberately does not log.
+   */
+  async checkConnectionStatus(): Promise<ProbeStatus> {
     try {
       const res = await fetch(`${this.rest}/api/version`, { signal: TIMEOUT(4000) });
-      return res.ok;
-    } catch {
-      return false;
+      return res.ok ? 'ok' : 'unreachable';
+    } catch (err) {
+      return isTimeoutError(err) ? 'timeout' : 'unreachable';
     }
   }
 
-  /** List chat-capable models (embeddings filtered out) with capabilities. */
+  async checkConnection(): Promise<boolean> {
+    return (await this.checkConnectionStatus()) === 'ok';
+  }
+
+  /**
+   * Cheap probe for the periodic health loop. `maxAgeMs` shares one probe
+   * across near-simultaneous callers (every open panel runs its own health
+   * tick against this shared client): a result younger than maxAgeMs —
+   * including one still in flight — is reused instead of issuing another
+   * request. Pass 0 (default) to force a fresh probe.
+   */
+  async probeHealth(maxAgeMs = 0): Promise<ProbeStatus> {
+    const now = Date.now();
+    if (this.probe && now - this.probe.startedAt <= maxAgeMs) {
+      return this.probe.promise;
+    }
+    this.probe = { startedAt: now, promise: this.checkConnectionStatus() };
+    return this.probe.promise;
+  }
+
+  /**
+   * The currently-loaded context of one model via a single cheap /api/ps call
+   * — no /api/tags, no per-model /api/show fan-out. undefined when the model
+   * isn't resident (or ps didn't answer). Used by the keep-warm poll, which
+   * must never guess: refreshing keep_alive at a wrong context forces a
+   * reload.
+   */
+  async loadedContextFor(modelId: string): Promise<number | undefined> {
+    try {
+      const res = await fetch(`${this.rest}/api/ps`, { signal: TIMEOUT(5000) });
+      if (!res.ok) {
+        return undefined;
+      }
+      const arr = ((await res.json()) as { models?: any[] }).models ?? [];
+      const m = arr.find((x) => x.name === modelId || x.model === modelId);
+      const ctx = m?.context_length;
+      return typeof ctx === 'number' && ctx > 0 ? ctx : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * List chat-capable models (embeddings filtered out) with capabilities.
+   * Concurrent callers (health refresh + a user send + a sibling panel) share
+   * one in-flight request instead of each triggering the /api/tags + /api/ps
+   * + per-model /api/show fan-out.
+   */
   async listModels(): Promise<OllamaModel[]> {
+    if (this.listing) {
+      return this.listing;
+    }
+    const p = this.doListModels().finally(() => {
+      if (this.listing === p) {
+        this.listing = undefined;
+      }
+    });
+    this.listing = p;
+    return p;
+  }
+
+  private async doListModels(): Promise<OllamaModel[]> {
     let tagModels: any[] = [];
     try {
       const res = await fetch(`${this.rest}/api/tags`, { signal: TIMEOUT(8000) });
