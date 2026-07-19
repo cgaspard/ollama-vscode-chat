@@ -1,0 +1,9 @@
+version: 0.11.1
+date: 2026-07-19
+highlights:
+  - Your last conversation is restored when VS Code reopens — no more digging through history after every relaunch. Thanks to @AlessandroPerazzetta (lmstudio-vscode-chat PR #8) for the idea and groundwork.
+added:
+  - The active session is remembered per workspace and reopened automatically on the next launch. Starting a new chat, deleting the active session, clearing history, or switching servers resets it so a fresh start stays fresh.
+changed: []
+fixed: []
+removed: []
