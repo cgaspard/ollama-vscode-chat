@@ -1,0 +1,21 @@
+version: 0.12.0
+date: 2026-07-19
+highlights:
+  - Far quieter polling — Ollama's server log is no longer peppered with model queries. The health check now runs every 30 seconds by default (configurable), probes only the tiny /api/version endpoint, and is shared across all open chat panels; the full model listing (/api/tags + /api/ps + per-model /api/show) runs far less often and never while a load is in flight.
+  - No more mid-generation hiccups — a server that answers slowly (loading or generating) no longer flips the panel to "Can't reach Ollama" and back; the offline banner now requires several consecutive timeouts (a refused connection still flips immediately, and reconnect retries stay at 5 seconds while offline).
+  - Your last conversation is restored when VS Code reopens — no more digging through history after every relaunch. Thanks to @AlessandroPerazzetta (lmstudio-vscode-chat PR #8) for the idea and groundwork.
+  - This stable release graduates the 0.11.x beta line — the extension now ships betas on the Marketplace pre-release channel first (odd minors); use "Switch to Pre-Release Version" on the Marketplace page to get new features early.
+added:
+  - New setting ollamaCode.healthCheckSeconds (default 30, range 5-120 — capped so the keep-warm ping always lands inside the 5-minute minimum keep_alive).
+  - The model picker fast-refreshes (about every 4s) while it is open, so loaded state is fresh exactly when you're looking at it — and stops the moment it closes (and never runs while a load is in flight).
+  - The active session is remembered per workspace and reopened automatically on the next launch. Starting a new chat, deleting the active session, clearing history, or switching servers resets it.
+  - An end-to-end test suite that runs a fake Ollama server and verifies the polling cadence, the keep-warm ping, the picker fast-poll, timeout hysteresis, and offline/recovery behavior against the real extension.
+changed:
+  - Keep-warm is decoupled from the model refresh — it now re-asserts keep_alive every 2 minutes via one cheap /api/ps lookup (even for hidden panels) instead of riding the full model-listing loop, and still never guesses a context length.
+  - Model-list refreshes are skipped while a panel is hidden, deduplicated across panels and concurrent callers, and only re-sent to the UI when something actually changed — a background refresh can no longer reset the model menu's scroll position.
+  - A reconnect no longer silently switches your model back to ollamaCode.defaultModel — the model you picked in the session always wins while it exists.
+  - Changing keep-alive from the model menu now pings the loaded model directly instead of running a second full model listing.
+fixed:
+  - Continuous model queries in Ollama's server log while the extension was idle (the sibling LM Studio Code issue #7, which applied here too).
+  - The offline banner appearing (and input being blocked) during long generations or model loads because a single health probe timed out while the server was busy.
+removed: []
