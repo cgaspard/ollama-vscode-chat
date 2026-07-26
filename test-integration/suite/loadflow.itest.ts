@@ -97,10 +97,10 @@ describe('Send gating + Load CTA', function () {
   });
 
   it('re-gates to a CTA if the selected model is switched to an unloaded one', async () => {
-    // qwen is loaded; switch selection to the unloaded llama via its row.
-    await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 2);
-    // The second row is llama3.3:70b (unloaded). Click it to select.
+    // qwen is loaded; move the selection to the unloaded llama. Asserted purely
+    // from the injected model list — waiting on rows left over from the previous
+    // test raced the host's own (empty, since there's no Ollama here) refresh,
+    // which lands whenever the picker has been opened.
     await helpers.post({ type: 'models', models: MODELS.map((m) => ({ ...m, loaded: m.id === 'qwen3:27b' })), currentModel: 'llama3.3:70b' });
     await waitFor('.send-btn.cta', (n) => n === 1);
     assert.strictEqual(await count('.send-btn.cta'), 1, 'selecting an unloaded model re-gates Send');

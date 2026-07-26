@@ -21,7 +21,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **MCP servers** — extend the agent with [Model Context Protocol](https://modelcontextprotocol.io) tools; servers you already configured for **Claude Code** (`.mcp.json`) or **VS Code** (`.vscode/mcp.json`) are picked up automatically. Type `/mcp` to see their live status
 - **Permission prompts** — Allow once / Allow always / Deny, inline
 - **Model manager** — load / eject Ollama models from the composer, with loaded state, context size, and capability badges (👁 vision / 🔧 tools)
-- **Multi-server** — register, switch, and remove Ollama servers; offline mode with a connection banner
+- **Multi-server** — register, switch, edit, and remove Ollama servers; offline mode with a connection banner
 - **Context meter** with compaction indicator, **thinking toggle**, **image attachments** for vision models, and the **open file** attached as excludable context
 - **Session history** — persistent, resumable, auto-named; delete one or clear all
 - **Auto-context** — loads the selected model with an adequate `num_ctx` so OpenCode's large system prompt doesn't overflow Ollama's small default window

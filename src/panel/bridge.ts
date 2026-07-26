@@ -516,14 +516,20 @@ export class ChatBridge {
           await this.deps.servers.add(msg.name, msg.url);
           this.postServers(this.connected);
           break;
-        case 'updateServer':
+        case 'updateServer': {
+          const before = this.deps.servers.list().find((s) => s.id === msg.id);
           await this.deps.servers.update(msg.id, msg.name, msg.url);
-          if (this.deps.servers.active().id === msg.id) {
+          const after = this.deps.servers.list().find((s) => s.id === msg.id);
+          // A rename (or no-op Save) must not tear down a live session — only
+          // reconnect when the URL the connection is built on actually changed.
+          const connectionChanged = !!before && !!after && before.url !== after.url;
+          if (this.deps.servers.active().id === msg.id && connectionChanged) {
             await this.switchServer(msg.id);
           } else {
             this.postServers(this.connected);
           }
           break;
+        }
         case 'removeServer': {
           const wasActive = this.deps.servers.active().id === msg.id;
           await this.deps.servers.remove(msg.id);

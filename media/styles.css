@@ -1393,6 +1393,34 @@ body {
 .server-add .model-action {
   align-self: flex-end;
 }
+/* The pencil is an svg, not text — center it so the row's two actions match. */
+.model-action.server-edit {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+}
+
+/* ---- Server edit overlay -------------------------------------------------- */
+.server-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+}
+.server-edit-form .server-input {
+  margin-bottom: 6px;
+}
+.server-edit-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+.server-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
 
 /* connection notice (server unreachable) — soft rounded card */
 .conn-banner {

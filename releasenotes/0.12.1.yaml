@@ -1,0 +1,14 @@
+version: 0.12.1
+date: 2026-07-25
+highlights:
+  - Edit a saved Ollama server in place - rename it or correct its URL without removing and re-adding it.
+  - Fixed a reliability hole where the panel could report "connected" forever against a dead OpenCode server.
+added:
+  - Pencil button on each server row opens an inline edit form for its name and URL.
+changed:
+  - Renaming the active server no longer tears down the live session. Only an actual URL change reconnects, since that is the only edit the connection is built on.
+fixed:
+  - If the bundled OpenCode server died while Ollama itself stayed reachable, nothing noticed - the panel kept showing "connected" against a dead client and every message failed with a raw connection error. The self-heal machinery existed but was never wired up; it now recovers automatically.
+  - A message that hits a connection error is retried once through a reconnect instead of surfacing the raw failure.
+  - Reconnect attempts after a failed OpenCode start now back off instead of respawning a broken server on every health tick.
+removed: []

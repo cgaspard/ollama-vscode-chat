@@ -299,6 +299,26 @@ function build(): void {
         <button id="server-add-btn" class="model-action load">Add server</button>
       </div>
     </div>
+    <div id="server-edit-overlay" class="overlay hidden">
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <span>Edit server</span>
+          <div class="overlay-head-actions">
+            <button id="server-edit-close" class="icon-btn">${icon.close}</button>
+          </div>
+        </div>
+        <div class="server-edit-form">
+          <label class="server-edit-label" for="server-edit-name">Name</label>
+          <input id="server-edit-name" class="server-input" />
+          <label class="server-edit-label" for="server-edit-url">URL</label>
+          <input id="server-edit-url" class="server-input" placeholder="http://192.168.1.50:11434" />
+          <div class="server-edit-actions">
+            <button id="server-edit-save" class="model-action load">Save</button>
+            <button id="server-edit-cancel" class="clear-all-btn">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div id="history-overlay" class="overlay hidden">
       <div class="overlay-card">
         <div class="overlay-head">
@@ -551,6 +571,14 @@ function build(): void {
       post({ type: 'addServer', name: nameEl.value, url: urlEl.value });
       nameEl.value = '';
       urlEl.value = '';
+    }
+  });
+  document.getElementById('server-edit-close')!.addEventListener('click', closeServerEdit);
+  document.getElementById('server-edit-cancel')!.addEventListener('click', closeServerEdit);
+  document.getElementById('server-edit-save')!.addEventListener('click', saveServerEdit);
+  document.getElementById('server-edit-overlay')!.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+      closeServerEdit();
     }
   });
   document.addEventListener('click', (e) => {
@@ -1657,6 +1685,7 @@ function renderServerMenu(): void {
         <span class="model-name">${escapeHtml(s.name)}${isActive ? ' ·  active' : ''}</span>
         <span class="model-meta">${escapeHtml(s.url)}</span>
       </span>
+      <button class="model-action server-edit" title="Edit server">${icon.pencil}</button>
       <button class="model-action eject" title="Remove server">✕</button>`;
     row.addEventListener('click', () => {
       if (!isActive) {
@@ -1664,12 +1693,49 @@ function renderServerMenu(): void {
       }
       closeServerMenu();
     });
-    (row.querySelector('.model-action') as HTMLButtonElement).addEventListener('click', (e) => {
+    (row.querySelector('.server-edit') as HTMLButtonElement).addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeServerMenu();
+      openServerEdit(s);
+    });
+    (row.querySelector('.eject') as HTMLButtonElement).addEventListener('click', (e) => {
       e.stopPropagation();
       post({ type: 'removeServer', id: s.id });
     });
     serverMenuList.appendChild(row);
   }
+}
+
+// ---- Server edit overlay ----------------------------------------------------
+
+/** The server currently open in the edit overlay (null when closed). */
+let editingServer: UiServer | null = null;
+
+function openServerEdit(s: UiServer): void {
+  editingServer = s;
+  (document.getElementById('server-edit-name') as HTMLInputElement).value = s.name;
+  (document.getElementById('server-edit-url') as HTMLInputElement).value = s.url;
+  document.getElementById('server-edit-overlay')!.classList.remove('hidden');
+}
+
+function closeServerEdit(): void {
+  editingServer = null;
+  document.getElementById('server-edit-overlay')!.classList.add('hidden');
+}
+
+function saveServerEdit(): void {
+  if (!editingServer) {
+    return;
+  }
+  const name = (document.getElementById('server-edit-name') as HTMLInputElement).value;
+  const url = (document.getElementById('server-edit-url') as HTMLInputElement).value;
+  // A blank URL would normalize to nothing usable — keep the overlay open so
+  // the user can fix it rather than silently saving a broken server.
+  if (!url.trim()) {
+    return;
+  }
+  post({ type: 'updateServer', id: editingServer.id, name, url });
+  closeServerEdit();
 }
 
 // ---- Composer overflow (⋯) -------------------------------------------------
@@ -3061,7 +3127,9 @@ function installTestHook(): void {
             ? (el.textContent ?? '').trim()
             : m.prop === 'class'
               ? el.className
-              : el.getAttribute(m.prop as string);
+              : m.prop === 'value'
+                ? ((el as HTMLInputElement).value ?? null)
+                : el.getAttribute(m.prop as string);
         reply({ count: els.length, value: els[0] ? read(els[0]) : null, values: els.map(read) });
       } else if (m.__test__ === 'click') {
         const el = document.querySelector(m.selector as string) as HTMLElement | null;
