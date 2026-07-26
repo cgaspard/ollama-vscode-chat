@@ -1,0 +1,24 @@
+version: 0.13.0
+date: 2026-07-26
+highlights:
+  - Reasoning effort is now a real control. Pick how hard the model thinks per model, from the model menu, the composer pill, or /effort.
+  - Only models Ollama reports as thinking-capable show the control at all - sending an effort to a model without it is a hard error on Ollama, not a harmless no-op, so the control stays hidden rather than risking a failed turn.
+  - User-defined agents. Define one as .opencode/agent/<name>.md and it appears in the agent picker, with its own system prompt, model, tool restrictions and reasoning effort.
+  - Agents you mark as subagents are not in the picker at all - the model discovers them and delegates through the built-in task tool, in a separate context that does not consume your conversation.
+  - Tokens/sec is now accurate, and each turn reports its whole cost rather than only what was generated.
+added:
+  - Reasoning effort selector in the model menu footer, alongside the context-window presets, scoped per model.
+  - The composer thinking pill is now an effort cycler showing the current level; alt-click toggles whether reasoning blocks are displayed.
+  - /effort slash command, and an ollamaCode.defaultThinkingEffort setting.
+  - /agents lists both the agents you can select and the ones only the model can delegate to; /agents new <name> scaffolds a definition and opens it.
+  - The agent picker is populated from the server rather than a hardcoded build/plan pair, so any agent you define shows up (badged "custom").
+changed:
+  - Models that grade effort (their template renders a thinking level, as gpt-oss does) get Low/Med/High. Models that only switch thinking on and off - qwen3 and deepseek-r1 among them - correctly show On rather than a slider that would do nothing.
+  - Effort now travels as a real request parameter instead of appending /no_think to your message, so it works across model families and leaves your prompt clean. The goal-loop judge uses it too.
+  - The generation stat reports the agent, prompt tokens in, output tokens with the thinking share, the combined total, elapsed time and tok/s.
+  - Reasoning blocks stream open so you can watch the model think, then collapse at the end of the turn labelled with how long it thought. A block you opened or closed yourself is left alone.
+  - Reasoning effort is remembered per model. A level carried over from another model is clamped to what the new one supports rather than sent blindly.
+fixed:
+  - Tokens/sec counted tool-execution and step-boundary time as generation time, understating the rate on any turn that used tools.
+  - The context meter assumed a fixed overhead per agent mode. It is now computed per agent and grows with the number of delegatable agents, since each one's description is appended to the task tool the primary agent sees.
+removed: []
