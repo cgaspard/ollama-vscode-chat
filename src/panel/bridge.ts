@@ -15,7 +15,8 @@ import {
   parseRevisionVerdict,
 } from '../core/goal';
 import { clampKeepAlive } from '../core/keepAlive';
-import { humanizeError } from '../core/errors';
+import { humanizeError, isConnectionError } from '../core/errors';
+import { ConnectResult, SelfHealer } from '../core/reconnect';
 import { ProbeStatus } from '../core/health';
 import { pickModel } from '../core/models';
 import { selectionLabel } from '../core/selection';
@@ -27,7 +28,7 @@ import { log, logError } from '../logger';
 import { discoverMcpServers } from '../mcp/discovery';
 import { OpencodeClient } from '../opencode/client';
 import { OpencodeEvent, PromptBody } from '../opencode/protocol';
-import { OpencodeServerManager } from '../opencode/serverManager';
+import { Disposable, OpencodeServerManager } from '../opencode/serverManager';
 import { Prefs } from '../prefs';
 import {
   HostToWebview,
@@ -131,6 +132,42 @@ export class ChatBridge {
   private editorSub: vscode.Disposable | undefined;
   private selectionSub: vscode.Disposable | undefined;
   private messageSub: vscode.Disposable | undefined;
+  private serverExitSub: Disposable | undefined;
+  /**
+   * Pure self-heal policy (reconnect timing, backoff, reload-after-reconnect).
+   * Ollama-specific duties stay OUT of here: keep-warm runs on its own wall
+   * clock in runHealthTick, because it must be re-asserted well inside its
+   * 5-minute minimum even on ticks where no model refresh is due.
+   */
+  private readonly healer: SelfHealer = new SelfHealer(
+    {
+      // Share one probe across all panels' ticks: a result younger than ~80% of
+      // the cadence IN EFFECT is fresh enough to reuse — while disconnected
+      // that cadence is the fast 5s one, so a restarted Ollama is noticed
+      // within ~5s.
+      probeUpstream: () => {
+        const cadence = this.connected ? this.healthIntervalMs() : OFFLINE_HEALTH_INTERVAL_MS;
+        return this.deps.ollama.probeHealth(Math.floor(cadence * 0.8));
+      },
+      serverHealthy: () => this.deps.server.isRunning && !!this.client,
+      isConnected: () => this.connected,
+      goOffline: () => this.markOffline(),
+      connect: () => this.init(),
+      // Skip the refresh while a load is in flight: the server is busy (possibly
+      // for minutes) and an extra listModels (/api/ps + parallel /api/show)
+      // contends with — and can stall — the load.
+      reloadModels: async () => {
+        if (this.loadsInFlight.size === 0) {
+          await this.refreshModelsToWebview('periodic');
+        }
+      },
+    },
+    {
+      refreshEvery: REFRESH_EVERY_TICKS,
+      offlineAfterTimeouts: OFFLINE_AFTER_TIMEOUTS,
+      backoff: { base: 2000, max: 30000 },
+    },
+  );
   private healthTimer: ReturnType<typeof setInterval> | undefined;
   private healthTicks = 0;
   /** Next wall-clock time (ms) the upstream probe is due; 0 = due now. */
@@ -164,6 +201,9 @@ export class ChatBridge {
     this.selectionSub = vscode.window.onDidChangeTextEditorSelection((e) =>
       this.updateSelection(e.textEditor),
     );
+    // Self-heal when the shared OpenCode server dies unexpectedly. Without this
+    // the panel keeps reporting `connected` against a dead client forever.
+    this.serverExitSub = this.deps.server.addExitListener(() => this.onServerExit());
   }
 
   dispose(): void {
@@ -172,6 +212,7 @@ export class ChatBridge {
     this.eventAbort?.abort();
     this.editorSub?.dispose();
     this.selectionSub?.dispose();
+    this.serverExitSub?.dispose();
     for (const ctrl of this.loadsInFlight.values()) {
       ctrl.abort(); // stop any readiness-poll loops
     }
@@ -217,7 +258,7 @@ export class ChatBridge {
     if (Date.now() >= this.nextProbeDueAt) {
       const started = Date.now();
       try {
-        await this.probeAndHeal();
+        await this.healer.tick();
       } finally {
         // While disconnected the next metronome tick (5s) probes again; while
         // connected wait out the configured cadence. Anchor to the tick START
@@ -226,6 +267,18 @@ export class ChatBridge {
         // metronome period, silently halving the probe rate.
         this.nextProbeDueAt = this.connected ? started + this.healthIntervalMs() - 500 : 0;
       }
+    }
+    // Keep-warm runs on its own wall clock, decoupled from the (slower,
+    // refreshEvery-gated) model refresh the healer drives: keep_alive must be
+    // re-asserted well within its 5-minute minimum even for hidden panels, and
+    // even on ticks where no refresh is due. Paused while a load is in flight.
+    if (
+      this.connected &&
+      this.loadsInFlight.size === 0 &&
+      Date.now() - this.lastKeepWarmAt >= KEEP_WARM_EVERY_MS
+    ) {
+      this.lastKeepWarmAt = Date.now();
+      await this.keepWarmNow().catch(() => undefined);
     }
     // Goal watchdog ("wake up on occasion"): if the loop lost its idle signal
     // (e.g. an error swallowed the event) re-check once things are quiet.
@@ -242,47 +295,55 @@ export class ChatBridge {
     }
   }
 
-  private async probeAndHeal(): Promise<void> {
-    // Share one probe across all panels' ticks (they use this same client):
-    // a result younger than ~80% of the cadence IN EFFECT is fresh enough to
-    // reuse — while disconnected that cadence is the fast 5s one, so a
-    // restarted Ollama really is noticed within ~5s.
-    const cadence = this.connected ? this.healthIntervalMs() : OFFLINE_HEALTH_INTERVAL_MS;
-    let status: ProbeStatus = 'unreachable';
-    try {
-      status = await this.deps.ollama.probeHealth(Math.floor(cadence * 0.8));
-    } catch {
-      status = 'unreachable';
+  /** LM/Ollama went away — keep the live OpenCode server, just show the banner. */
+  private markOffline(): void {
+    this.connected = false;
+    this.postServers(false);
+    this.post({ type: 'status', text: 'Lost connection to Ollama — reconnecting…', kind: 'warn' });
+  }
+
+  /** The shared OpenCode server crashed: drop our stale client + stream, reconnect. */
+  private onServerExit(): void {
+    if (this.disposed) {
+      return;
     }
-    this.timeoutStreak = status === 'timeout' ? this.timeoutStreak + 1 : 0;
-    if (status === 'ok' && !this.connected) {
-      await this.init(); // came online → full setup + model load
-    } else if (status === 'ok' && this.connected) {
-      // Pause the model refresh + keep-warm while a load is in flight: the
-      // server is busy loading (possibly for minutes) and an extra listModels
-      // (/api/ps + parallel /api/show) would contend with — and can stall —
-      // the load. The load's own readiness poll drives state meanwhile.
-      if (this.loadsInFlight.size === 0) {
-        if (++this.healthTicks % REFRESH_EVERY_TICKS === 0) {
-          await this.refreshModelsToWebview('periodic').catch(() => undefined);
-        }
-        // Keep-warm runs on its own wall-clock cadence, decoupled from the
-        // (slower, visibility-gated) model refresh: keep_alive must be
-        // re-asserted well within its 5-minute minimum even for hidden panels.
-        if (Date.now() - this.lastKeepWarmAt >= KEEP_WARM_EVERY_MS) {
-          this.lastKeepWarmAt = Date.now();
-          await this.keepWarmNow().catch(() => undefined);
-        }
-      }
-    } else if (status !== 'ok' && this.connected) {
-      // A refused connection means Ollama really is gone — flip immediately.
-      // A timeout just means it's slow (loading/generating): tolerate a streak
-      // before showing the offline banner (LM Studio Code issue #7).
-      if (status !== 'timeout' || this.timeoutStreak >= OFFLINE_AFTER_TIMEOUTS) {
-        this.connected = false;
-        this.postServers(false); // went offline → show the banner
-      }
+    log('opencode server exited unexpectedly — reconnecting');
+    this.teardownConnection(false); // server is already gone
+    this.healer.allowImmediate(); // permit an immediate reconnect
+    this.post({ type: 'status', text: 'Reconnecting…', kind: 'warn' });
+    void this.healer.reconnect(); // reconnects + reloads models on success
+  }
+
+  /**
+   * Abort the event stream and drop the client so a fresh connect re-subscribes
+   * cleanly. Only dispose the *shared* server when asked (and when it is ours to
+   * dispose) — other panels may still be using it.
+   */
+  private teardownConnection(disposeServer: boolean): void {
+    this.eventAbort?.abort();
+    this.eventAbort = undefined;
+    this.client = undefined;
+    if (disposeServer) {
+      this.deps.server.dispose();
     }
+  }
+
+  /** True when Ollama is reachable and we have a live OpenCode client. */
+  private isLive(): boolean {
+    return this.connected && !!this.client && this.deps.server.isRunning;
+  }
+
+  /**
+   * Re-establish the connection after a transient failure. If the OpenCode
+   * process is gone we fully re-init (which respawns it); otherwise we just
+   * re-verify Ollama and reuse the running server. The healer reloads models on
+   * success. Returns whether we are live afterwards.
+   */
+  private async reconnect(): Promise<boolean> {
+    if (!this.deps.server.isRunning) {
+      this.teardownConnection(false);
+    }
+    return this.healer.reconnect();
   }
 
   /**
@@ -584,20 +645,20 @@ export class ChatBridge {
     }
   }
 
-  private async init(): Promise<void> {
+  private async init(): Promise<ConnectResult> {
     this.startHealthPoll();
     if (this.connecting) {
-      return;
+      return this.isLive() ? 'connected' : 'upstream-down';
     }
     this.connecting = true;
     try {
-      await this.doInit();
+      return await this.doInit();
     } finally {
       this.connecting = false;
     }
   }
 
-  private async doInit(): Promise<void> {
+  private async doInit(): Promise<ConnectResult> {
     const cfg = getConfig();
     const active = this.deps.servers.active();
     this.deps.ollama.setBaseUrl(active.url);
@@ -625,7 +686,9 @@ export class ChatBridge {
         keepAlive: this.keepAlive(),
       });
       this.post({ type: 'status', text: `Can't reach Ollama at ${active.url}`, kind: 'warn' });
-      return;
+      log(`doInit: Ollama unreachable at ${active.url}`);
+      // No backoff for this — the poll recovers the moment Ollama answers again.
+      return 'upstream-down';
     }
 
     this.post({ type: 'status', text: 'Starting OpenCode server…' });
@@ -633,6 +696,9 @@ export class ChatBridge {
     try {
       started = await this.deps.server.start();
     } catch (err) {
+      // Ollama is fine but OpenCode failed to come up — report 'failed' so the
+      // healer backs off instead of respawning a broken server every tick.
+      logError('opencode server failed to start', err);
       const message = humanizeError(err, { subject: 'the OpenCode server' });
       this.post({ type: 'error', message });
       this.lastPostedModelsJson = ''; // webview shows models: [] — resync diff-guard
@@ -647,7 +713,7 @@ export class ChatBridge {
         minContext: cfg.minContextLength,
         keepAlive: this.keepAlive(),
       });
-      return;
+      return 'failed';
     }
     this.client = started.client;
 
@@ -700,7 +766,10 @@ export class ChatBridge {
     this.updateActiveFile(vscode.window.activeTextEditor);
     this.updateSelection(vscode.window.activeTextEditor);
     this.warnIfAgentsLarge();
+    // Clean connect — clear any reconnect backoff held by the healer.
+    this.healer.noteConnected();
     this.post({ type: 'status', text: '' });
+    return 'connected';
   }
 
   /** Warn once if AGENTS.md/CLAUDE.md (auto-loaded by OpenCode) is large. */
@@ -1195,12 +1264,10 @@ export class ChatBridge {
   /** Switch the active Ollama server: tear down OpenCode and re-initialize. */
   private async switchServer(id: string): Promise<void> {
     await this.deps.servers.setActive(id);
-    this.eventAbort?.abort();
-    this.eventAbort = undefined;
-    this.client = undefined;
     this.currentSessionID = null;
     this.persistSession(null);
-    this.deps.server.dispose();
+    this.healer.allowImmediate(); // a deliberate switch shouldn't wait on backoff
+    this.teardownConnection(true);
     this.post({ type: 'cleared' });
     await this.init();
   }
@@ -1456,10 +1523,8 @@ export class ChatBridge {
    * while preserving the current session. */
   private async rebuildServer(status: string): Promise<void> {
     this.post({ type: 'status', text: status });
-    this.eventAbort?.abort();
-    this.eventAbort = undefined;
-    this.client = undefined;
-    this.deps.server.dispose();
+    this.healer.allowImmediate(); // a deliberate rebuild shouldn't wait on backoff
+    this.teardownConnection(true);
     await this.init();
   }
 
@@ -1904,12 +1969,32 @@ export class ChatBridge {
     }
 
     this.post({ type: 'busy', busy: true });
-    await this.client.promptAsync(this.currentSessionID!, {
+    const body: PromptBody = {
       model: { providerID: 'ollama', modelID: this.currentModel },
       agent: this.agent,
       ...(system ? { system } : {}),
       parts,
-    });
+    };
+    try {
+      await this.client.promptAsync(this.currentSessionID!, body);
+    } catch (err) {
+      // A dead OpenCode client surfaces as a connection error on the very next
+      // send. Heal and retry once rather than surfacing a raw fetch failure.
+      if (!isConnectionError(err)) {
+        throw err;
+      }
+      logError('prompt failed on a connection error — reconnecting and retrying', err);
+      this.post({ type: 'status', text: 'Reconnecting…', kind: 'warn' });
+      const live = await this.reconnect();
+      if (live && this.client && this.currentSessionID) {
+        await this.client.promptAsync(this.currentSessionID, body);
+        this.post({ type: 'status', text: '' });
+      } else {
+        throw new Error(
+          'Lost connection to Ollama. It looks offline — start it and try again; I’ll keep reconnecting in the background.',
+        );
+      }
+    }
 
     // Auto-name the session from the first user prompt.
     if ((this.currentTitle === 'New chat' || this.currentTitle === '') && text.trim()) {
