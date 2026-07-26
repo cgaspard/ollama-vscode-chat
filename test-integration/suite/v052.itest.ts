@@ -44,7 +44,9 @@ describe('v0.5.2 webview features', function () {
       assert.ok(stat, 'gen-stat should be present');
       assert.match(stat!, /tok\/s/, 'stat should report a token rate');
       assert.match(stat!, /^~/, 'estimate should be prefixed with ~');
-      assert.match(stat!, /~100 tokens/, 'should estimate ~100 tokens from 400 chars');
+      // Wording changed in v0.13 to fit the full picture, e.g.
+      // "build · 8.0k in · 876 out (776 thinking) · 8.9k total · 21.1s · 42 tok/s".
+      assert.match(stat!, /~100 out\b/, 'should estimate ~100 tokens from 400 chars');
     });
 
     it('shows NO gen-stat for a tool-only turn (no streamed text)', async () => {

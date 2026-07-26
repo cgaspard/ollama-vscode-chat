@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
 import { resolveBinaryPath } from '../core/binary';
 import { clampContext } from '../core/context';
+import { variantsForModel } from '../core/effort';
 import { augmentedPath } from '../core/mcp';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
@@ -276,6 +277,12 @@ export class OpencodeServerManager {
           // <think> blocks before answering (8192 truncated them mid-thought),
           // but still a fraction of the window so input isn't crowded out.
           limit: { context: ctx, output: Math.min(32768, Math.floor(ctx / 4)) },
+          // Reasoning-effort levels, selectable per message via PromptBody.variant.
+          // Declared unconditionally for every model — declaring a variant a model
+          // can't use is harmless (only *sending* it errors), and unconditional
+          // declaration keeps effort changes from needing a server restart. The
+          // gate lives in core/effort.ts, which decides what may be sent.
+          variants: variantsForModel(),
         };
       }
     } catch (err) {

@@ -126,12 +126,8 @@
         },
         "ollamaCode.agent": {
           "type": "string",
-          "enum": [
-            "build",
-            "plan"
-          ],
           "default": "build",
-          "description": "OpenCode agent. 'build' can edit files and run tools; 'plan' is read-only."
+          "description": "Agent to select by default. 'build' edits your code; 'plan' is read-only. Any agent you define in .opencode/agent/*.md (or ~/.config/opencode/agent/) can also be named here \u2014 it appears in the picker after the OpenCode server restarts."
         },
         "ollamaCode.autoEnsureContext": {
           "type": "boolean",
@@ -215,6 +211,25 @@
               }
             }
           }
+        },
+        "ollamaCode.defaultThinkingEffort": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use each model's own default reasoning behavior",
+            "Suppress reasoning entirely (sends reasoning_effort: none)",
+            "Minimal reasoning",
+            "Moderate reasoning",
+            "Maximum reasoning"
+          ],
+          "description": "Starting reasoning effort for models you haven't set one for. Only models Ollama reports as thinking-capable show the control at all \u2014 sending an effort to a model without it is an error, not a no-op. Models whose template doesn't grade effort collapse low/medium/high to a single 'On'."
         }
       }
     }

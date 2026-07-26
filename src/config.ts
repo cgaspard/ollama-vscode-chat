@@ -1,4 +1,12 @@
 import * as vscode from 'vscode';
+import { ALL_LEVELS, type EffortLevel } from './core/effort';
+
+/** Settings.json is hand-editable, so an unknown level must not reach the wire. */
+function normalizeEffort(value: unknown): EffortLevel {
+  return typeof value === 'string' && (ALL_LEVELS as string[]).includes(value)
+    ? (value as EffortLevel)
+    : 'auto';
+}
 import { normalizeOllamaUrl, ollamaRestRoot } from './core/url';
 
 // Re-exported from the pure core module so existing importers keep working
@@ -10,7 +18,10 @@ export interface ExtensionConfig {
   opencodePath: string;
   serverPort: number;
   defaultModel: string;
-  agent: 'build' | 'plan';
+  /** Starting reasoning effort for models with no per-model choice stored. */
+  defaultThinkingEffort: EffortLevel;
+  /** Default agent name. Free-form: user-defined agents are discovered at runtime. */
+  agent: string;
   autoEnsureContext: boolean;
   minContextLength: number;
   keepAlive: string; // Ollama keep_alive, e.g. "30m"
@@ -29,7 +40,8 @@ export function getConfig(): ExtensionConfig {
     opencodePath: (cfg.get<string>('opencodePath') ?? '').trim(),
     serverPort: cfg.get<number>('serverPort') ?? 0,
     defaultModel: (cfg.get<string>('defaultModel') ?? '').trim(),
-    agent: (cfg.get<string>('agent') as 'build' | 'plan') ?? 'build',
+    agent: (cfg.get<string>('agent') ?? 'build').trim() || 'build',
+    defaultThinkingEffort: normalizeEffort(cfg.get<string>('defaultThinkingEffort')),
     autoEnsureContext: cfg.get<boolean>('autoEnsureContext') ?? true,
     minContextLength: cfg.get<number>('minContextLength') ?? 32768,
     keepAlive: (cfg.get<string>('keepAlive') ?? '30m').trim(),

@@ -243,6 +243,27 @@ export interface FilePartInputSource {
   text: { value: string; start: number; end: number };
 }
 
+// `GET /agent` — every agent the server knows: built-ins plus anything
+// discovered from .opencode/agent/*.md, ~/.config/opencode/agent/, or the
+// injected config. `mode` decides the audience: 'primary' (user-pickable),
+// 'subagent' (delegation-only, via the task tool), or 'all' (both).
+export interface OpencodeAgent {
+  name: string;
+  description?: string;
+  mode?: 'primary' | 'subagent' | 'all' | string;
+  /** True for OpenCode's own built-ins. */
+  native?: boolean;
+  /** Internal agents (title/summary/compaction) — never list these. */
+  hidden?: boolean;
+  model?: { providerID?: string; modelID?: string } | null;
+  tools?: Record<string, boolean>;
+  color?: string;
+  variant?: string;
+  [k: string]: unknown;
+}
+
+export type AgentsResponse = OpencodeAgent[];
+
 export interface PromptBody {
   model: ModelRef;
   agent?: string;

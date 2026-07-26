@@ -1,6 +1,7 @@
 import { nextDelay } from '../core/backoff';
 import { logError } from '../logger';
 import {
+  AgentsResponse,
   CommandsResponse,
   McpStatusResponse,
   MessageWithParts,
@@ -102,6 +103,17 @@ export class OpencodeClient {
     body: { command: string; arguments?: string; agent?: string; model?: string },
   ): Promise<void> {
     await this.req('POST', `/session/${sessionID}/command`, body);
+  }
+
+  /**
+   * Agents the server knows (`GET /agent`) — built-ins plus any the user defined
+   * on disk. Read-only: OpenCode has no runtime CRUD for agents, and a
+   * `PATCH /config` carrying an `agent` key returns 200 while silently doing
+   * nothing (the registry is memoized at startup), so new agents require a
+   * server restart.
+   */
+  async listAgents(): Promise<AgentsResponse> {
+    return this.req('GET', '/agent');
   }
 
   async createSession(title?: string): Promise<Session> {

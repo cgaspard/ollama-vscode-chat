@@ -30,6 +30,13 @@ export interface OllamaModel {
   toolUse?: boolean;
   vision?: boolean;
   reasoning?: boolean;
+  /**
+   * Whether the model accepts GRADED effort (low/medium/high) rather than just
+   * on/off. Ollama exposes no capability list for this, but it passes
+   * `.ThinkLevel` into model templates — so a template referencing it is the
+   * (verified) oracle. gpt-oss: yes; qwen3 / deepseek-r1: no.
+   */
+  reasoningGranular?: boolean;
   quantization?: string; // e.g. "Q4_K_M", "Q8_0" (details.quantization_level)
   family?: string; // model family, e.g. "llama", "qwen3" (details.family)
   publisher?: string; // disambiguator slot — for Ollama this is the family
@@ -177,7 +184,10 @@ export class OllamaClient {
       tagModels.map(async (m) => {
         const info = await this.showModel(m.name).catch(() => null);
         const caps: string[] = (info?.capabilities as string[]) ?? [];
-        return { m, caps, maxCtx: maxContextFromInfo(info?.model_info) };
+        // /api/show returns the model's prompt template; a reference to
+        // `.ThinkLevel` means the template renders a graded effort level.
+        const granular = typeof info?.template === 'string' && info.template.includes('.ThinkLevel');
+        return { m, caps, maxCtx: maxContextFromInfo(info?.model_info), granular };
       }),
     );
 
@@ -186,7 +196,7 @@ export class OllamaClient {
         ({ caps, m }) =>
           m && typeof m.name === 'string' && !caps.includes('embedding') && !/embed/i.test(m.name),
       )
-      .map(({ m, caps, maxCtx }): OllamaModel => ({
+      .map(({ m, caps, maxCtx, granular }): OllamaModel => ({
         id: m.name,
         displayName: prettyName(m.name),
         type: caps.includes('vision') ? 'vlm' : 'llm',
@@ -198,6 +208,7 @@ export class OllamaClient {
         toolUse: caps.includes('tools'),
         vision: caps.includes('vision'),
         reasoning: caps.includes('thinking'),
+        reasoningGranular: granular,
         quantization: m.details?.quantization_level,
         family: m.details?.family,
         // Ollama has no "publisher"; the family is the best same-name

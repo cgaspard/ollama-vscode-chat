@@ -8,7 +8,33 @@ import {
   shouldSuppressMessage,
 } from '../core/compaction';
 import { matchSlashPrefix, mergeSlashCommands, parseSlashInput } from '../core/commands';
+import {
+  type AgentInfo,
+  agentLabel,
+  agentOverheadTokens,
+  agentTooltip,
+  pickableAgents,
+  resolveAgent,
+} from '../core/agents';
 import { computeWindow, contextPresets, formatTokens } from '../core/context';
+import {
+  type EffortLevel,
+  type ReasoningCapability,
+  isBinary,
+  levelLabel,
+  levelsForModel,
+  resolveLevel,
+} from '../core/effort';
+import {
+  formatRate,
+  formatThinkingLabel,
+  newTurnRate,
+  recordAgent,
+  recordDelta,
+  recordTokens,
+  summarize,
+  type TurnRate,
+} from '../core/genrate';
 import {
   formatLoadElapsed,
   formatModelDate,
@@ -20,7 +46,7 @@ import {
 import { isTodoCardCollapsed, summarizeTodos, Todo } from '../core/todos';
 import { buildAnswers, isEmptyAnswer, parseQuestionBlob, QInfo } from '../core/question';
 import type { MessageWithParts, OpencodeEvent, Part } from '../opencode/protocol';
-import type { HostToWebview, UiCommand, UiGoal, UiImage, UiMcpServer, UiModel, UiServer, UiSession, UiSkill, WebviewToHost } from '../shared';
+import type { HostToWebview, UiAgent, UiCommand, UiGoal, UiImage, UiMcpServer, UiModel, UiServer, UiSession, UiSkill, WebviewToHost } from '../shared';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -42,13 +68,20 @@ function post(msg: WebviewToHost): void {
 interface State {
   models: UiModel[];
   currentModel: string | null;
-  agent: 'build' | 'plan';
+  agent: string;
+  /** Selectable agents from the server (built-ins + user-defined). */
+  agents: UiAgent[];
   sessions: UiSession[];
   currentSessionID: string | null;
   busy: boolean;
   serverReady: boolean;
   ollamaConnected: boolean;
-  thinking: boolean;
+  /** Reasoning depth per model id. Effort is a per-model property. */
+  effortByModel: Record<string, EffortLevel>;
+  /** Configured fallback when a model has no stored choice. */
+  defaultEffort: EffortLevel;
+  /** Whether reasoning blocks are *displayed* — independent of generation depth. */
+  showReasoning: boolean;
   pendingImages: UiImage[];
   minContext: number;
   keepAlive: string;
@@ -65,17 +98,28 @@ interface State {
   activeSelection: { path: string; startLine: number; endLine: number; chars: number } | null;
   activeGoal: UiGoal | null;
 }
-const persisted = (vscode.getState() as { thinking?: boolean; includeActiveFile?: boolean }) ?? {};
+const persisted =
+  (vscode.getState() as {
+    thinking?: boolean; // legacy (pre-effort) — migrated below
+    showReasoning?: boolean;
+    effortByModel?: Record<string, EffortLevel>;
+    includeActiveFile?: boolean;
+  }) ?? {};
 const state: State = {
   models: [],
   currentModel: null,
   agent: 'build',
+  agents: [],
   sessions: [],
   currentSessionID: null,
   busy: false,
   serverReady: false,
   ollamaConnected: false,
-  thinking: persisted.thinking ?? true,
+  effortByModel: persisted.effortByModel ?? {},
+  defaultEffort: 'auto',
+  // Migrate the old single boolean: it drove display as well as generation, so
+  // an existing "thinking off" user keeps reasoning hidden.
+  showReasoning: persisted.showReasoning ?? persisted.thinking ?? true,
   pendingImages: [],
   minContext: 32768,
   keepAlive: '30m',
@@ -107,10 +151,11 @@ const todoCards = new Map<string, HTMLElement>(); // messageID -> checklist card
 const todoCollapsed = new Map<string, boolean>(); // messageID -> user-forced collapse (unset = auto)
 let turnTruncated = false; // the current turn hit its output-token budget (finish reason 'length')
 let closeMenuOnLoad = false; // user hit Load from the menu — close it once the load returns
-// Generation-speed tracking. We estimate tokens/sec from the streamed output
-// (chars/4) and our own elapsed time, so the live rate works while streaming.
-let turnOutputChars = 0; // streamed output chars this turn
-let turnFirstTokenAt = 0; // when the first output token arrived (Date.now), for an accurate rate
+// Generation-speed tracking. Accounting lives in ../core/genrate (pure + tested):
+// it counts only the time the model was actually streaming — tool calls and step
+// boundaries are excluded — and prefers the exact token usage OpenCode reports on
+// the assistant message over the chars/4 estimate used mid-stream.
+let turnRate: TurnRate = newTurnRate();
 // Compaction bookkeeping. OpenCode's summarize ("/compact") writes a user
 // message with a `compaction` part, then streams the summarizer model's own
 // reasoning + the summary template as an ordinary assistant turn. Neither is a
@@ -266,10 +311,7 @@ function build(): void {
               <span class="model-btn-label">Model</span>
               <span class="caret">${icon.caret}</span>
             </button>
-            <select id="agent-select" class="picker agent" title="Agent">
-              <option value="build">build</option>
-              <option value="plan">plan</option>
-            </select>
+            <select id="agent-select" class="picker agent" title="Agent — who drives the turn"></select>
             <button id="send" class="send-btn" title="Send">${icon.send}</button>
           </div>
         </div>
@@ -492,13 +534,23 @@ function build(): void {
   });
   inputEl.addEventListener('blur', () => closeSlashMenu());
 
-  // Thinking toggle
-  thinkBtn.addEventListener('click', () => {
-    state.thinking = !state.thinking;
-    persist();
-    applyThinking();
+  // Effort cycler. Plain click steps through the levels this model supports;
+  // alt-click toggles whether reasoning is *shown*, which is a separate axis.
+  thinkBtn.addEventListener('click', (e) => {
+    if (e.altKey) {
+      state.showReasoning = !state.showReasoning;
+      persist();
+      applyEffort();
+      return;
+    }
+    const levels = levelsForModel(currentReasoning());
+    if (levels.length === 0) {
+      return;
+    }
+    const i = levels.indexOf(currentEffort());
+    setEffort(levels[(i + 1) % levels.length]);
   });
-  applyThinking();
+  applyEffort();
 
   // Active-file context toggle
   ctxFileBtn.addEventListener('click', () => {
@@ -616,7 +668,7 @@ function build(): void {
     }
   });
   agentSelect.addEventListener('change', () => {
-    state.agent = agentSelect.value as 'build' | 'plan';
+    state.agent = agentSelect.value;
     post({ type: 'selectAgent', agent: state.agent });
     renderMeter();
   });
@@ -650,6 +702,8 @@ const LOCAL_COMMANDS: SlashCommand[] = [
   { name: '/file', hint: 'Toggle including the open file as context', run: toggleFileCommand },
   { name: '/mcp', hint: 'Show connected MCP servers and their status', run: mcpCommand },
   { name: '/skills', hint: 'Show the skills available to the model', run: skillsCommand },
+  { name: '/effort', hint: 'Set reasoning effort for this model — /effort auto|off|low|med|high', run: effortCommand },
+  { name: '/agents', hint: 'Show agents — yours to pick, and ones the model can delegate to; /agents new <name>', run: agentsCommand },
   { name: '/goal', hint: 'Pursue a goal until it is met — /goal <objective>, /goal clear', run: goalCommand },
   { name: '/help', hint: 'List the available slash commands', run: helpCommand },
 ];
@@ -682,6 +736,41 @@ function compactCommand(): void {
   post({ type: 'compact' });
 }
 
+/**
+ * `/effort <level>` — set reasoning depth for the current model. With no
+ * argument it reports what's in effect and what this model actually supports,
+ * which matters because most local models collapse every "on" level into one.
+ */
+function effortCommand(args?: string): void {
+  const reasoning = currentReasoning();
+  const levels = levelsForModel(reasoning);
+  if (levels.length === 0) {
+    addSysChip('This model reports no reasoning support, so effort has no effect.');
+    return;
+  }
+  const arg = (args ?? '').trim().toLowerCase();
+  if (!arg) {
+    addSysChip(
+      `Reasoning effort: ${levelLabel(currentEffort(), reasoning)}. ` +
+        `Available for this model: ${levels.map((l) => levelLabel(l, reasoning)).join(', ')}.`,
+    );
+    return;
+  }
+  // Accept the shorthand the hint advertises, plus "on" for binary models.
+  const alias: Record<string, EffortLevel> = { med: 'medium', on: 'high', none: 'off' };
+  const wanted = (alias[arg] ?? arg) as EffortLevel;
+  if (!levels.includes(wanted)) {
+    addSysChip(
+      `"${arg}" isn't available for this model. Try: ${levels
+        .map((l) => levelLabel(l, reasoning))
+        .join(', ')}.`,
+    );
+    return;
+  }
+  setEffort(wanted);
+  addSysChip(`Reasoning effort set to ${levelLabel(wanted, reasoning)} for this model.`);
+}
+
 function toggleFileCommand(): void {
   if (!state.activeFile) {
     addSysChip('No open file to include as context.');
@@ -703,6 +792,60 @@ function mcpCommand(): void {
 
 // Request the discovered skills from the host (GET /skill). Rendered by
 // showSkills() so the user can confirm their project/global skills are found.
+/**
+ * `/agents` lists both halves of the roster; `/agents new <name>` scaffolds a
+ * definition on disk and opens it.
+ */
+function agentsCommand(args?: string): void {
+  const a = (args ?? '').trim();
+  const m = /^(?:new|add|create)\s+(.+)$/i.exec(a);
+  if (m) {
+    post({ type: 'createAgent', name: m[1].trim() });
+    return;
+  }
+  if (a) {
+    addSysChip(`Unknown /agents argument "${a}". Use /agents or /agents new <name>.`);
+    return;
+  }
+  addSysChip('Checking agents…');
+  post({ type: 'requestAgents' });
+}
+
+function showAgents(pickable: UiAgent[], delegatable: UiAgent[]): void {
+  const el = document.createElement('div');
+  el.className = 'sys-chip mcp-panel';
+  const row = (a: UiAgent, dot: string, badge: string) => {
+    const desc = a.description ? `<div class="skill-desc">${escapeHtml(a.description)}</div>` : '';
+    const model = a.modelID
+      ? `<div class="skill-path">always runs on ${escapeHtml(a.modelID)}</div>`
+      : '';
+    const custom = a.native === false ? '<span class="mcp-transport">custom</span>' : '';
+    return (
+      `<div class="mcp-row"><span class="mcp-dot ${dot}"></span><div class="mcp-row-body">` +
+      `<div class="mcp-row-top"><span class="mcp-name">${escapeHtml(a.name)}</span>${custom}` +
+      `<span class="mcp-status-label ${dot}">${badge}</span></div>${desc}${model}` +
+      `</div></div>`
+    );
+  };
+  // Two sections because they are genuinely different audiences: you drive the
+  // first, the model reaches the second on its own.
+  const picked = pickable.map((a) => row(a, 'ok', 'you pick')).join('');
+  const deleg = delegatable.map((a) => row(a, 'pending', 'model delegates')).join('');
+  el.innerHTML =
+    '<div class="mcp-head">Agents you can select</div>' +
+    (picked || '<div class="mcp-empty">None.</div>') +
+    '<div class="mcp-head">Agents the model can delegate to</div>' +
+    (deleg ||
+      '<div class="mcp-empty">None. These are reached through the built-in task tool, not the picker.</div>') +
+    '<div class="mcp-empty">Define one as <code>.opencode/agent/&lt;name&gt;.md</code> with YAML frontmatter ' +
+    '(<code>description</code>, <code>mode</code>, optional <code>model</code>/<code>tools</code>) and the body as its prompt — ' +
+    'or run <code>/agents new &lt;name&gt;</code>. The <code>description</code> is what the model reads when deciding to delegate. ' +
+    'New agents load when the OpenCode server restarts.</div>';
+  messagesEl.appendChild(el);
+  toggleWelcome();
+  forceScrollToBottom();
+}
+
 function skillsCommand(): void {
   addSysChip('Checking skills…');
   post({ type: 'requestSkills' });
@@ -1081,7 +1224,7 @@ function onSend(): void {
   post({
     type: 'send',
     text,
-    thinking: state.thinking,
+    effort: currentEffort(),
     images,
     includeActiveFile: !!(state.activeFile && state.includeActiveFile),
     // The current selection is always attached silently when present.
@@ -1089,15 +1232,109 @@ function onSend(): void {
   });
 }
 
-function applyThinking(): void {
-  thinkBtn.classList.toggle('active', state.thinking);
-  document.body.classList.toggle('hide-reasoning', !state.thinking);
-  thinkBtn.title = state.thinking ? 'Thinking: on' : 'Thinking: off';
+/** Declared reasoning capability of the current model (undefined = unknown). */
+function currentReasoning(): ReasoningCapability | null | undefined {
+  return state.models.find((m) => m.id === state.currentModel)?.reasoning;
+}
+
+/** The effective level for the current model, clamped to what it supports. */
+function currentEffort(): EffortLevel {
+  const stored = state.currentModel ? state.effortByModel[state.currentModel] : undefined;
+  return resolveLevel(stored ?? state.defaultEffort, currentReasoning());
+}
+
+function setEffort(level: EffortLevel): void {
+  if (!state.currentModel) {
+    return;
+  }
+  state.effortByModel[state.currentModel] = level;
+  persist();
+  applyEffort();
+  renderEffortPresets();
+}
+
+/**
+ * Reflect effort + reasoning-display state into the composer. The pill cycles
+ * through the levels this model actually offers; the body class controls only
+ * whether existing reasoning blocks are visible.
+ */
+function applyEffort(): void {
+  const reasoning = currentReasoning();
+  const levels = levelsForModel(reasoning);
+  const level = currentEffort();
+  document.body.classList.toggle('hide-reasoning', !state.showReasoning);
+  if (levels.length === 0) {
+    // Model declares no reasoning support — nothing to cycle.
+    thinkBtn.classList.add('hidden');
+    layoutComposer(); // the freed width lets other pills come back out of ⋯
+    return;
+  }
+  const wasHidden = thinkBtn.classList.contains('hidden');
+  thinkBtn.classList.remove('hidden');
+  if (wasHidden) {
+    layoutComposer();
+  }
+  thinkBtn.classList.toggle('active', level !== 'off' && level !== 'auto');
+  const label = levelLabel(level, reasoning);
+  const span = thinkBtn.querySelector('span');
+  if (span) {
+    // Always the level's own name. Labelling `auto` as "Thinking" read as a
+    // third on-state next to "On" rather than as "let the model decide".
+    span.textContent = label;
+  }
+  thinkBtn.title =
+    (level === 'auto'
+      ? "Reasoning effort: Auto — the model's own default"
+      : `Reasoning effort: ${label}`) +
+    (reasoning === undefined ? ' (support unknown for this model)' : '') +
+    ' — click to cycle, alt-click to show/hide reasoning';
+}
+
+/** Effort selector in the model-menu footer, mirroring the context presets. */
+function renderEffortPresets(): void {
+  const el = document.getElementById('effort-presets');
+  const foot = document.getElementById('effort-foot');
+  const note = document.getElementById('effort-note');
+  if (!el || !foot) {
+    return;
+  }
+  const reasoning = currentReasoning();
+  const levels = levelsForModel(reasoning);
+  // A model that reports no reasoning support gets no control at all, rather
+  // than a dead one.
+  foot.classList.toggle('hidden', levels.length === 0);
+  if (note) {
+    note.textContent =
+      reasoning === undefined
+        ? 'Effort support unknown for this model — it will be sent anyway (harmless if unsupported).'
+        : isBinary(reasoning)
+          ? 'This model reports on/off reasoning only.'
+          : '';
+  }
+  const active = currentEffort();
+  el.innerHTML = '';
+  for (const lvl of levels) {
+    const b = document.createElement('button');
+    b.className = 'ctx-preset' + (lvl === active ? ' active' : '');
+    b.textContent = levelLabel(lvl, reasoning);
+    b.title =
+      lvl === 'auto'
+        ? "Use the model's own default"
+        : lvl === 'off'
+          ? 'Suppress reasoning entirely'
+          : `Reasoning effort: ${levelLabel(lvl, reasoning)}`;
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setEffort(lvl);
+    });
+    el.appendChild(b);
+  }
 }
 
 function persist(): void {
   vscode.setState({
-    thinking: state.thinking,
+    showReasoning: state.showReasoning,
+    effortByModel: state.effortByModel,
     includeActiveFile: state.includeActiveFile,
   });
 }
@@ -1311,8 +1548,40 @@ function closeLightbox(): void {
 // ---------------------------------------------------------------------------
 // Model / agent pickers
 // ---------------------------------------------------------------------------
+/**
+ * Populate the agent picker from the server roster. Only pickable agents appear
+ * (mode primary/all); subagents are delegation-only and would do nothing here.
+ */
+function renderAgents(): void {
+  const agents = state.agents.length
+    ? state.agents
+    : // Pre-connect fallback so the control is never empty.
+      [{ name: 'build', native: true }, { name: 'plan', native: true }];
+  const wanted = resolveAgent(state.agent, agents as AgentInfo[]);
+  const sig = JSON.stringify(agents.map((a) => a.name));
+  if (agentSelect.dataset.sig !== sig) {
+    agentSelect.dataset.sig = sig;
+    agentSelect.innerHTML = '';
+    for (const a of agents) {
+      const opt = document.createElement('option');
+      opt.value = a.name;
+      opt.textContent = agentLabel(a as AgentInfo);
+      const tip = agentTooltip(a as AgentInfo);
+      if (tip) {
+        opt.title = tip;
+      }
+      agentSelect.appendChild(opt);
+    }
+  }
+  if (state.agent !== wanted) {
+    state.agent = wanted;
+    post({ type: 'selectAgent', agent: wanted });
+  }
+  agentSelect.value = wanted;
+}
+
 function renderModels(): void {
-  agentSelect.value = state.agent;
+  renderAgents();
   const cur = state.models.find((m) => m.id === state.currentModel);
   const dot = modelBtn.querySelector('.model-dot') as HTMLElement;
   const label = modelBtn.querySelector('.model-btn-label') as HTMLElement;
@@ -1877,7 +2146,10 @@ function estimateUsed(): number {
   for (const ps of partState.values()) {
     chars += ps.buffer.length;
   }
-  const overhead = state.agent === 'plan' ? 6000 : 9000;
+  // Per-agent, and grows with the delegatable roster: every subagent's
+  // description is appended to the `task` tool the primary agent sees. A
+  // subagent's own prompt does NOT count here — it runs in its own session.
+  const overhead = agentOverheadTokens(state.agent, state.agents as AgentInfo[]);
   const images = document.querySelectorAll('.msg-img').length + state.pendingImages.length;
   const fileTokens =
     state.activeFile && state.includeActiveFile ? Math.ceil(state.activeFile.chars / 4) : 0;
@@ -1997,8 +2269,19 @@ function renderTextLike(ps: { el: HTMLElement; buffer: string; type: string }): 
   if (ps.type === 'reasoning') {
     if (!ps.el.querySelector('.reasoning-body')) {
       ps.el.innerHTML =
-        '<details class="reasoning" open><summary><span class="chev"></span>Thinking</summary><div class="reasoning-body"></div></details>';
+        '<details class="reasoning" open><summary><span class="chev"></span><span class="reasoning-label">Thinking…</span></summary><div class="reasoning-body"></div></details>';
+      ps.el.dataset.startedAt = String(Date.now());
+      // A block the user opened or closed by hand is theirs — auto-collapse must
+      // not override it. Listen for the click rather than `toggle`: `toggle`
+      // also fires when the element is inserted already-open, which would mark
+      // every block as user-touched and defeat the collapse entirely.
+      const sum = ps.el.querySelector('details.reasoning > summary') as HTMLElement;
+      sum.addEventListener('click', () => {
+        ps.el.dataset.userToggled = '1';
+      });
     }
+    ps.el.dataset.endedAt = String(Date.now());
+    ps.el.dataset.chars = String(ps.buffer.length);
     (ps.el.querySelector('.reasoning-body') as HTMLElement).innerHTML = mdToHtml(ps.buffer);
   } else {
     // Fallback: a model that printed the AskUserQuestion JSON as text instead
@@ -2155,32 +2438,20 @@ function appendDelta(partID: string, field: string, delta: string): void {
   if (!ps) {
     return;
   }
-  // Count streamed output for the generation-speed estimate. Stamp the first
-  // token so the rate measures generation, not the prompt-processing wait.
+  // Feed the generation-rate accounting. Gaps longer than the idle threshold
+  // (tool calls, step boundaries) are dropped there rather than counted as slow
+  // tokens, which is what made the old wall-clock rate read far too low.
   if (delta && (ps.type === 'text' || ps.type === 'reasoning')) {
-    if (!turnFirstTokenAt) {
-      turnFirstTokenAt = Date.now();
-    }
-    turnOutputChars += delta.length;
+    recordDelta(turnRate, ps.type === 'reasoning' ? 'reasoning' : 'text', delta.length, Date.now());
   }
   ps.buffer += delta;
   renderTextLike(ps);
   scrollToBottom();
 }
 
-// Estimated generation rate for the current turn, or null if not measurable yet.
-// Tokens are estimated as chars/4; the rate is over the time since the first
-// token (excludes prompt-processing latency).
-function currentGenRate(): { tokens: number; seconds: number; tps: number } | null {
-  if (!turnFirstTokenAt || turnOutputChars <= 0) {
-    return null;
-  }
-  const seconds = (Date.now() - turnFirstTokenAt) / 1000;
-  const tokens = Math.round(turnOutputChars / 4);
-  if (seconds <= 0) {
-    return null;
-  }
-  return { tokens, seconds, tps: tokens / seconds };
+// Generation rate for the current turn, or null if not measurable yet.
+function currentGenRate() {
+  return summarize(turnRate);
 }
 
 function renderTool(el: HTMLElement, part: { tool: string; state: any }, partId: string): void {
@@ -2527,7 +2798,7 @@ function renderQuestion(requestID: string | null, questions: QInfo[]): void {
       const text = questions
         .map((q, i) => `${q.header || q.question}: ${answers[i].join(', ')}`)
         .join('\n');
-      post({ type: 'send', text, thinking: false });
+      post({ type: 'send', text, effort: 'off' });
     }
     lock(`Answered: ${answers.map((a) => a.join(', ')).filter(Boolean).join(' · ')}`);
   };
@@ -2577,7 +2848,7 @@ function showWorking(label = 'Working…'): void {
       parts.push(`${s}s`);
     }
     if (rate && rate.tps >= 0.5) {
-      parts.push(`~${Math.round(rate.tps)} tok/s`);
+      parts.push(`${rate.exact ? '' : '~'}${Math.round(rate.tps)} tok/s`);
     }
     workingElapsedEl.textContent = parts.join(' · ');
   }, 1000);
@@ -2598,9 +2869,48 @@ function hideWorking(): void {
 // Append a small estimated generation-speed stat under the just-finished
 // assistant turn (e.g. "~340 tokens · 7.5s · ~45 tok/s"). No-op when there's
 // nothing measurable (e.g. a tool-only turn with no streamed text).
+/**
+ * Collapse every still-open reasoning block in the finished turn, relabelling it
+ * with how long the model thought and roughly how much it produced. Exact
+ * reasoning tokens are used when the turn had a single reasoning block (so the
+ * message total unambiguously belongs to it); otherwise each block reports its
+ * own chars/4 estimate.
+ */
+function collapseReasoning(): void {
+  const msgs = messagesEl.querySelectorAll('.msg.assistant');
+  const last = msgs[msgs.length - 1] as HTMLElement | undefined;
+  if (!last) {
+    return;
+  }
+  const blocks = Array.from(last.querySelectorAll('.part-reasoning')) as HTMLElement[];
+  const exactReasoning = turnRate.tokens?.reasoning ?? 0;
+  const useExact = blocks.length === 1 && exactReasoning > 0;
+  for (const wrap of blocks) {
+    const details = wrap.querySelector('details.reasoning') as HTMLDetailsElement | null;
+    const label = wrap.querySelector('.reasoning-label') as HTMLElement | null;
+    if (!details) {
+      continue;
+    }
+    const started = Number(wrap.dataset.startedAt ?? 0);
+    const ended = Number(wrap.dataset.endedAt ?? 0);
+    const chars = Number(wrap.dataset.chars ?? 0);
+    const tokens = useExact ? exactReasoning : Math.round(chars / 4);
+    if (label && started && ended >= started) {
+      label.textContent = formatThinkingLabel(ended - started, tokens, useExact);
+    } else if (label) {
+      label.textContent = 'Thinking';
+    }
+    // Only auto-collapse blocks the user hasn't already interacted with, so a
+    // deliberately-opened block doesn't slam shut when the turn ends.
+    if (details.open && !wrap.dataset.userToggled) {
+      details.open = false;
+    }
+  }
+}
+
 function appendGenStat(): void {
   const rate = currentGenRate();
-  if (!rate || rate.tokens < 1) {
+  if (!rate || rate.total < 1) {
     return;
   }
   const msgs = messagesEl.querySelectorAll('.msg.assistant');
@@ -2610,8 +2920,13 @@ function appendGenStat(): void {
   }
   const el = document.createElement('div');
   el.className = 'gen-stat';
-  el.textContent = `~${rate.tokens} tokens · ${rate.seconds.toFixed(1)}s · ~${Math.round(rate.tps)} tok/s`;
-  el.title = 'Estimated from the response length.';
+  el.textContent = formatRate(rate);
+  el.title =
+    (rate.agent ? `Run by the "${rate.agent}" agent. ` : '') +
+    (rate.exact
+      ? 'Exact token usage reported by Ollama. '
+      : 'Token count estimated from the response length (exact usage had not arrived yet). ') +
+    'tok/s counts output tokens over the time the model was generating — prompt processing, tool calls and step boundaries are excluded.';
   last.appendChild(el);
 }
 
@@ -2635,8 +2950,7 @@ function setBusy(busy: boolean): void {
   sendBtn.classList.toggle('busy', busy);
   if (busy) {
     turnTruncated = false; // fresh turn — clear any prior truncation flag
-    turnOutputChars = 0; // reset generation-speed tracking for the new turn
-    turnFirstTokenAt = 0;
+    turnRate = newTurnRate(); // reset generation-speed tracking for the new turn
     showWorking('Working…');
   } else {
     hideWorking();
@@ -2864,6 +3178,10 @@ function handleEvent(event: OpencodeEvent): void {
           // current. Clear the "pending" flag even when no token usage is
           // reported — otherwise the meter sticks on "compacted" forever.
           state.pendingCompaction = false;
+          // Exact usage for the generation stat — preferred over chars/4.
+          recordTokens(turnRate, info.tokens);
+          // Which agent actually ran the turn.
+          recordAgent(turnRate, (info as { agent?: string }).agent);
           if (info.tokens) {
             const used = tokensUsed(info.tokens);
             if (used > 0) {
@@ -2913,6 +3231,7 @@ function handleEvent(event: OpencodeEvent): void {
       break;
     case 'session.idle':
       // Capture the generation rate before setBusy(false) clears the counters.
+      collapseReasoning();
       appendGenStat();
       setBusy(false);
       renderMeter();
@@ -2950,6 +3269,9 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.serverReady = msg.serverReady;
       state.ollamaConnected = msg.ollamaConnected;
       state.minContext = msg.minContext;
+      state.agents = msg.agents ?? [];
+      state.defaultEffort = msg.defaultEffort ?? 'auto';
+      applyEffort(); // levels depend on the selected model's declared capability
       state.keepAlive = msg.keepAlive;
       renderModels();
       renderMeter();
@@ -3026,6 +3348,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
     case 'cleared':
       clearConversation();
       renderMeter();
+      applyEffort(); // a model switch can change which levels exist
       break;
     case 'event':
       handleEvent(msg.event);
@@ -3067,6 +3390,13 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       break;
     case 'skills':
       showSkills(msg.skills);
+      break;
+    case 'agents':
+      // Keep the picker in sync with what the panel just showed.
+      state.agents = msg.agents;
+      renderAgents();
+      renderMeter(); // the delegatable count feeds the overhead estimate
+      showAgents(msg.agents, msg.delegatable);
       break;
     case 'commands':
       setServerCommands(msg.commands);
