@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# ...except the vendored provider build, which IS the thing we ship. Without
+# this exception the `dist/` rule above silently swallows it and a fresh
+# checkout cannot stage the bundle.
+!vendor/**/dist/
+!vendor/**/dist/**
 out/
 out-test/
 *.vsix
@@ -7,6 +12,9 @@ out-test/
 .claude/scheduled_tasks.lock
 # Bundled OpenCode binary is fetched at package time, never committed.
 bin/
+# Ollama provider staged at package time by scripts/bundle-provider.js. The
+# patched source it wraps lives in vendor/ and IS committed.
+opencode-provider/
 out-integration/
 .vscode-test/
 # Local scratch / agent-demo artifacts (not part of the extension).

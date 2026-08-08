@@ -1,0 +1,26 @@
+{
+  "name": "ollama-ai-provider-cgaspard",
+  "version": "4.0.1-cgaspard.1",
+  "description": "Patched fork of ollama-ai-provider-v2 bundled with Ollama Code (untagged file data + graded think).",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^4.0.4",
+    "@ai-sdk/provider-utils": "^5.0.14"
+  },
+  "_forkedFrom": {
+    "repo": "https://github.com/cgaspard/ollama-ai-provider-v2",
+    "branch": "fix/untagged-file-data-and-graded-think",
+    "upstreamPR": "https://github.com/opencomp-eu/ollama-ai-provider-v2/pull/206"
+  }
+}

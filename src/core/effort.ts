@@ -14,18 +14,20 @@
  *
  * Three facts shape this module:
  *
- * 1. The variant option key is `think`, and it is a BOOLEAN. We used to send
- *    `reasoningEffort` through Ollama's OpenAI shim; the native provider takes
- *    `providerOptions.ollama`, whose schema is `{ think?: boolean, options?: {
- *    num_ctx, … } }` — anything else is silently stripped by its zod parse.
- *    Verified: `{think:true}` produced 38,745 reasoning chars from qwen3:0.6b,
+ * 1. The variant option key is `think`. We used to send `reasoningEffort`
+ *    through Ollama's OpenAI shim; the native provider reads
+ *    `providerOptions.ollama`, whose schema is `{ think?, options? }` —
+ *    anything else is silently stripped by its zod parse. Verified:
+ *    `{think:true}` produced 38,745 reasoning chars from qwen3:0.6b,
  *    `{think:false}` produced 0, and `{reasoningEffort:'high'}` produced 0.
  *
- * 2. ⚠️ THERE IS NO GRADED EFFORT ON THIS TRANSPORT. Ollama itself grades via
- *    `.ThinkLevel`, but ollama-ai-provider-v2 flattens every non-'none' effort
- *    to `think: true` (it even emits the warning "Ollama only supports on/off
- *    thinking"). So gpt-oss's low/medium/high cannot be expressed here, and
- *    offering them would be a lie. Every thinking model is binary.
+ * 2. Graded effort rides on the same key, as a STRING. Ollama grades thinking
+ *    for models whose template reads `.ThinkLevel` — gpt-oss returned 37
+ *    thinking chars for `think:"low"` and 414 for `think:"high"` — and a model
+ *    that cannot grade treats a level as thinking-on rather than erroring
+ *    (qwen3 accepted `"high"` and simply thought). Stock ollama-ai-provider-v2
+ *    flattens every level to `think:true`; the fork we bundle forwards it. So
+ *    `granular` models get the real scale and everything else stays binary.
  *
  * 3. ⚠️ THE INVERTED RULE. On LM Studio, sending an effort a model doesn't
  *    support is a harmless no-op, so unknown capability means "offer
@@ -64,10 +66,12 @@ export const ALL_LEVELS: EffortLevel[] = ['auto', 'off', 'low', 'medium', 'high'
  * There is deliberately no `auto` entry — auto means "omit `variant`", which
  * leaves the model's own default thinking behavior alone.
  */
-export function variantsForModel(): Record<string, { think: boolean }> {
+export function variantsForModel(): Record<string, { think: boolean | string }> {
   return {
     off: { think: false },
-    high: { think: true },
+    low: { think: 'low' },
+    medium: { think: 'medium' },
+    high: { think: 'high' },
   };
 }
 
@@ -75,12 +79,8 @@ export function variantsForModel(): Record<string, { think: boolean }> {
  * Which levels to show for a model, derived from its declared capabilities.
  *
  * - no capability / not supported -> [] (hide the control; sending would fail)
- * - supported                     -> auto/off/on
- *
- * `granular` is still detected from the model template (see the client) but is
- * deliberately NOT offered: the provider flattens every graded effort to a
- * boolean, so a low/medium/high picker would send identical requests and lie
- * about the difference. See fact 2 in the module docblock.
+ * - supported + granular          -> auto/off/low/medium/high
+ * - supported, not granular       -> auto/off/on
  */
 export function levelsForModel(reasoning: ReasoningCapability | undefined | null): EffortLevel[] {
   // Unknown is treated as unsupported — the inverse of the LM Studio rule, and
@@ -88,18 +88,16 @@ export function levelsForModel(reasoning: ReasoningCapability | undefined | null
   if (!reasoning || !reasoning.supported) {
     return [];
   }
-  // Thinking-capable: it can think or not, and on this transport that is the
-  // entire scale — for graded models too.
+  if (reasoning.granular) {
+    return [...ALL_LEVELS];
+  }
+  // Thinking-capable but ungraded: it can think or not, and that is the scale.
   return ['auto', 'off', 'high'];
 }
 
-/**
- * True when a model collapses every "on" level to the same thing (so the UI
- * says On, not High). On this transport that is every thinking model, graded or
- * not, because the provider only carries a boolean.
- */
+/** True when a model collapses every "on" level to the same thing (so the UI says On, not High). */
 export function isBinary(reasoning: ReasoningCapability | undefined | null): boolean {
-  return !!reasoning && reasoning.supported;
+  return !!reasoning && reasoning.supported && !reasoning.granular;
 }
 
 /** Label for a level, given the model's shape. Binary models say On rather than High. */

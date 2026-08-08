@@ -17,6 +17,15 @@ import { Prefs } from '../prefs';
 import { OpencodeClient } from './client';
 import { BUILD_PROMPT, PLAN_PROMPT } from './prompts';
 
+/**
+ * The Ollama provider we ship and pre-seed: a patched fork of
+ * ollama-ai-provider-v2 (provenance and upstream PR in
+ * vendor/<pkg>/package.json). Two fixes matter here — image parts no longer
+ * throw on untagged file data, and a graded thinking effort reaches Ollama
+ * instead of being flattened to a boolean.
+ */
+const BUNDLED_PROVIDER = 'ollama-ai-provider-cgaspard';
+
 export interface ServerStartResult {
   baseUrl: string;
   client: OpencodeClient;
@@ -89,6 +98,7 @@ export class OpencodeServerManager {
       );
     }
     await this.prepareBundledBinary(bin);
+    this.seedBundledProvider();
 
     const configContent = await this.buildConfigContent();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
@@ -360,7 +370,7 @@ export class OpencodeServerManager {
       },
       provider: {
         ollama: {
-          npm: 'ollama-ai-provider-v2',
+          npm: BUNDLED_PROVIDER,
           name: 'Ollama',
           options: { baseURL: `${this.ollama.getBaseUrl()}/api` },
           ...(Object.keys(models).length ? { models } : {}),
@@ -369,6 +379,54 @@ export class OpencodeServerManager {
       ...(Object.keys(mcp).length ? { mcp } : {}),
     };
     return JSON.stringify(config);
+  }
+
+  /**
+   * Copy the bundled provider into OpenCode's package cache so it never has to
+   * fetch one from npm.
+   *
+   * OpenCode resolves a config `npm:` provider by installing it under
+   * $XDG_CACHE_HOME/opencode/packages/<name>/ — and buildEnv pins
+   * XDG_CACHE_HOME into our private dataDir, so that path is entirely ours to
+   * populate. A ready-made tree there is enough: verified against an
+   * unpublished package name with no registry access at all.
+   *
+   * Best-effort and idempotent. Re-copies when the staged version differs (an
+   * extension update), no-ops otherwise, and a failure is not fatal — OpenCode
+   * would just fall back to npm, which is the old behaviour.
+   */
+  private seedBundledProvider(): void {
+    try {
+      const staged = path.join(
+        this.extensionPath,
+        'opencode-provider',
+        'packages',
+        BUNDLED_PROVIDER,
+      );
+      if (!fs.existsSync(staged)) {
+        logError('bundled provider missing from the extension; OpenCode will try npm', staged);
+        return;
+      }
+      const dest = path.join(this.dataDir, 'cache', 'opencode', 'packages', BUNDLED_PROVIDER);
+      const versionOf = (dir: string): string | undefined => {
+        try {
+          const manifest = path.join(dir, 'node_modules', BUNDLED_PROVIDER, 'package.json');
+          return JSON.parse(fs.readFileSync(manifest, 'utf8')).version as string;
+        } catch {
+          return undefined;
+        }
+      };
+      const want = versionOf(staged);
+      if (want && want === versionOf(dest)) {
+        return; // already seeded at this version
+      }
+      log(`seeding bundled provider ${BUNDLED_PROVIDER}@${want} into ${dest}`);
+      fs.rmSync(dest, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.cpSync(staged, dest, { recursive: true });
+    } catch (err) {
+      logError('could not seed the bundled provider (falling back to npm)', err);
+    }
   }
 
   /**

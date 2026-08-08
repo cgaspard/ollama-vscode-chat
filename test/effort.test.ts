@@ -19,15 +19,18 @@ const GRANULAR: ReasoningCapability = { supported: true, granular: true };
 // llama3.2 and friends: no `thinking` capability at all.
 const NONE: ReasoningCapability = { supported: false, granular: false };
 
-test('variants send the provider\'s boolean `think` — reasoningEffort is stripped', () => {
-  // ollama-ai-provider-v2 parses providerOptions.ollama as { think?, options? }
-  // and drops anything else. Wire-verified: {think:true} produced 38,745
-  // reasoning chars from qwen3:0.6b, {think:false} and {reasoningEffort:'high'}
-  // both produced 0.
+test('variants send `think` — reasoningEffort is stripped by the provider', () => {
+  // The provider parses providerOptions.ollama as { think?, options? } and
+  // drops anything else. Wire-verified: {think:true} produced 38,745 reasoning
+  // chars from qwen3:0.6b, {think:false} and {reasoningEffort:'high'} both 0.
   const v = variantsForModel();
-  assert.deepEqual(Object.keys(v).sort(), ['high', 'off']);
-  assert.equal(v.off.think, false);
-  assert.equal(v.high.think, true);
+  assert.deepEqual(Object.keys(v).sort(), ['high', 'low', 'medium', 'off']);
+  assert.equal(v.off.think, false); // 'off' is the only boolean — it means "do not think"
+  // Levels ride as strings so a .ThinkLevel model can actually grade them:
+  // gpt-oss returned 37 thinking chars for "low" vs 414 for "high".
+  assert.equal(v.low.think, 'low');
+  assert.equal(v.medium.think, 'medium');
+  assert.equal(v.high.think, 'high');
   for (const key of Object.keys(v)) {
     assert.ok(!('reasoningEffort' in (v[key] as object)), `${key} must not use reasoningEffort`);
   }
@@ -52,22 +55,19 @@ test('a thinking model without .ThinkLevel collapses to auto/off/on', () => {
   assert.equal(levelLabel('high', BINARY), 'On');
 });
 
-test('even a .ThinkLevel model is binary here — the provider carries a boolean', () => {
-  // Ollama itself grades via .ThinkLevel, but the provider flattens every
-  // non-none effort to think:true (it warns as much). Offering low/medium/high
-  // would send byte-identical requests and lie about the difference.
-  assert.deepEqual(levelsForModel(GRANULAR), ['auto', 'off', 'high']);
-  assert.ok(isBinary(GRANULAR));
-  assert.equal(levelLabel('high', GRANULAR), 'On');
+test('a .ThinkLevel model exposes the graded scale', () => {
+  // Real on the wire, not decorative: the bundled provider forwards the level
+  // instead of flattening it, and gpt-oss answered "low" and "high" with 37 vs
+  // 414 thinking characters.
+  assert.deepEqual(levelsForModel(GRANULAR), ['auto', 'off', 'low', 'medium', 'high']);
+  assert.ok(!isBinary(GRANULAR));
+  assert.equal(levelLabel('high', GRANULAR), 'High');
 });
 
 test('resolveLevel clamps a level carried over from another model', () => {
   assert.equal(resolveLevel('medium', BINARY), 'off'); // meaningless on a binary model
   assert.equal(resolveLevel('high', BINARY), 'high');
-  // A stored 'medium' (or a settings.json default) now degrades the same way on
-  // every thinking model, since none of them expose the middle of the scale.
-  assert.equal(resolveLevel('medium', GRANULAR), 'off');
-  assert.equal(resolveLevel('high', GRANULAR), 'high');
+  assert.equal(resolveLevel('medium', GRANULAR), 'medium');
   assert.equal(resolveLevel(undefined, GRANULAR), 'auto');
 });
 

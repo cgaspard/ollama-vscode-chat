@@ -17,6 +17,9 @@ tsconfig.test.json
 .vscodeignore
 *.vsix
 scripts/**
+# The patched provider SOURCE. Only the staged copy under opencode-provider/
+# (produced by scripts/bundle-provider.js) is needed at runtime.
+vendor/**
 media/sample.gif
 media/ollama-logo.svg
 media/screenshots/**
