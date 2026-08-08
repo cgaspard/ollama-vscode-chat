@@ -19,14 +19,18 @@ const GRANULAR: ReasoningCapability = { supported: true, granular: true };
 // llama3.2 and friends: no `thinking` capability at all.
 const NONE: ReasoningCapability = { supported: false, granular: false };
 
-test('variants use camelCase reasoningEffort — snake_case is silently dropped on the wire', () => {
+test('variants send the provider\'s boolean `think` — reasoningEffort is stripped', () => {
+  // ollama-ai-provider-v2 parses providerOptions.ollama as { think?, options? }
+  // and drops anything else. Wire-verified: {think:true} produced 38,745
+  // reasoning chars from qwen3:0.6b, {think:false} and {reasoningEffort:'high'}
+  // both produced 0.
   const v = variantsForModel();
-  assert.deepEqual(Object.keys(v).sort(), ['high', 'low', 'medium', 'off']);
+  assert.deepEqual(Object.keys(v).sort(), ['high', 'off']);
+  assert.equal(v.off.think, false);
+  assert.equal(v.high.think, true);
   for (const key of Object.keys(v)) {
-    assert.ok('reasoningEffort' in v[key], `${key} must use camelCase reasoningEffort`);
-    assert.ok(!('reasoning_effort' in (v[key] as object)), `${key} must not use snake_case`);
+    assert.ok(!('reasoningEffort' in (v[key] as object)), `${key} must not use reasoningEffort`);
   }
-  assert.equal(v.off.reasoningEffort, 'none'); // 'off' is spelled 'none' to Ollama
 });
 
 test('a non-thinking model offers NOTHING — sending would be a hard 400', () => {
@@ -48,16 +52,22 @@ test('a thinking model without .ThinkLevel collapses to auto/off/on', () => {
   assert.equal(levelLabel('high', BINARY), 'On');
 });
 
-test('a .ThinkLevel model exposes the graded scale', () => {
-  assert.deepEqual(levelsForModel(GRANULAR), ['auto', 'off', 'low', 'medium', 'high']);
-  assert.ok(!isBinary(GRANULAR));
-  assert.equal(levelLabel('high', GRANULAR), 'High');
+test('even a .ThinkLevel model is binary here — the provider carries a boolean', () => {
+  // Ollama itself grades via .ThinkLevel, but the provider flattens every
+  // non-none effort to think:true (it warns as much). Offering low/medium/high
+  // would send byte-identical requests and lie about the difference.
+  assert.deepEqual(levelsForModel(GRANULAR), ['auto', 'off', 'high']);
+  assert.ok(isBinary(GRANULAR));
+  assert.equal(levelLabel('high', GRANULAR), 'On');
 });
 
 test('resolveLevel clamps a level carried over from another model', () => {
   assert.equal(resolveLevel('medium', BINARY), 'off'); // meaningless on a binary model
   assert.equal(resolveLevel('high', BINARY), 'high');
-  assert.equal(resolveLevel('medium', GRANULAR), 'medium');
+  // A stored 'medium' (or a settings.json default) now degrades the same way on
+  // every thinking model, since none of them expose the middle of the scale.
+  assert.equal(resolveLevel('medium', GRANULAR), 'off');
+  assert.equal(resolveLevel('high', GRANULAR), 'high');
   assert.equal(resolveLevel(undefined, GRANULAR), 'auto');
 });
 

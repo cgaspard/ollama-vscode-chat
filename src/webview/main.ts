@@ -250,17 +250,23 @@ let modelLoadTimer: ReturnType<typeof setInterval> | undefined;
 
 function build(): void {
   const app = document.getElementById('app')!;
+  // Injected into <body data-version> by the host, so it is available before
+  // the first message arrives and needs no protocol field.
+  const appVersion = document.body.dataset.version ?? '';
   app.innerHTML = `
-    <div id="titlebar-actions" class="titlebar-actions">
-      <button id="ta-new" class="ta-btn" title="New chat">${icon.plus}</button>
-      <button id="ta-history" class="ta-btn" title="Session history">${icon.history}</button>
-      <button id="ta-tab" class="ta-btn" title="Open chat in editor tab">${icon.window}</button>
+    <div class="titlebar">
+      <span class="ver-chip" title="Ollama Code extension version">${appVersion ? `v${appVersion}` : ''}</span>
+      <div id="titlebar-actions" class="titlebar-actions">
+        <button id="ta-new" class="ta-btn" title="New chat">${icon.plus}</button>
+        <button id="ta-history" class="ta-btn" title="Session history">${icon.history}</button>
+        <button id="ta-tab" class="ta-btn" title="Open chat in editor tab">${icon.window}</button>
+      </div>
     </div>
     <div id="conn-banner" class="conn-banner hidden"></div>
     <div id="messages" class="messages">
       <div id="welcome" class="welcome">
         <div class="welcome-logo">${icon.sparkLarge}</div>
-        <div class="welcome-title">Ollama Code</div>
+        <div class="welcome-title">Ollama Code${appVersion ? ` <span class="welcome-ver">v${appVersion}</span>` : ''}</div>
         <div class="welcome-sub">Local agentic coding, powered by OpenCode.</div>
         <div class="welcome-hint">Pick a model below and describe a task.</div>
       </div>
@@ -1307,9 +1313,13 @@ function renderEffortPresets(): void {
     note.textContent =
       reasoning === undefined
         ? 'Effort support unknown for this model — it will be sent anyway (harmless if unsupported).'
-        : isBinary(reasoning)
-          ? 'This model reports on/off reasoning only.'
-          : '';
+        : reasoning?.granular
+          ? // The model grades effort; Ollama's API carries only a boolean, so
+            // the graded levels genuinely are not available here.
+            "This model grades its thinking, but Ollama's API carries thinking as on/off only."
+          : isBinary(reasoning)
+            ? 'This model reports on/off reasoning only.'
+            : '';
   }
   const active = currentEffort();
   el.innerHTML = '';

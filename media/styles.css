@@ -34,10 +34,8 @@ body {
    stay discoverable), but dimmed at rest and brought to full strength on panel
    hover or keyboard focus so it doesn't compete with the conversation. */
 .titlebar-actions {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  z-index: 20;
+  /* The .titlebar wrapper owns the absolute corner now, so the version chip
+     can sit to its left without inheriting this cluster's fade. */
   display: flex;
   gap: 1px;
   padding: 2px;
@@ -2142,4 +2140,33 @@ body.compacting .send-btn {
 #input:disabled,
 .send-btn:disabled {
   cursor: not-allowed;
+}
+
+/* Extension version: sits left of the title-bar actions. Deliberately outside
+   .titlebar-actions, which fades to opacity 0 until hover — the version is
+   meant to be readable at all times. */
+.titlebar {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ver-chip {
+  font-size: 10.5px;
+  opacity: 0.4;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+.ver-chip:empty {
+  display: none;
+}
+.welcome-ver {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.5;
+  vertical-align: middle;
 }

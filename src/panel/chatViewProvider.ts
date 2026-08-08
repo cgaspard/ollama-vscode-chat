@@ -8,7 +8,12 @@ function nonceStr(): string {
   return randomBytes(32).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 32);
 }
 
-function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+/** The installed extension version, e.g. "0.16.0" — surfaced in the UI. */
+function extensionVersion(deps: BridgeDeps): string {
+  return String(deps.context.extension.packageJSON.version ?? '');
+}
+
+function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri, version: string): string {
   const nonce = nonceStr();
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'main.js'),
@@ -31,9 +36,9 @@ function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${styleUri}" rel="stylesheet" />
-  <title>Ollama Code</title>
+  <title>Ollama Code v${version}</title>
 </head>
-<body>
+<body data-version="${version}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
@@ -55,7 +60,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [this.extensionUri],
     };
-    view.webview.html = getHtml(view.webview, this.extensionUri);
+    const version = extensionVersion(this.deps);
+    view.webview.html = getHtml(view.webview, this.extensionUri, version);
+    // Sits greyed next to the view's title in the sidebar header, so the
+    // running version is on screen at all times — not just on the empty state.
+    view.description = version ? `v${version}` : undefined;
     // A view can be re-resolved (moved between sidebars, etc.). Dispose any
     // prior bridge first so we never leave a second onDidReceiveMessage handler
     // attached — otherwise one "send" fans out to multiple prompt requests and
@@ -84,9 +93,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 /** Open the chat as an editor tab (parallel conversation). */
 export function openChatPanel(extensionUri: vscode.Uri, deps: BridgeDeps): vscode.WebviewPanel {
+  const version = String(deps.context.extension.packageJSON.version ?? '');
+  const titled = version ? `Ollama Code v${version}` : 'Ollama Code';
   const panel = vscode.window.createWebviewPanel(
     'ollamaCode.chatPanel',
-    'Ollama Code',
+    titled,
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
@@ -94,10 +105,10 @@ export function openChatPanel(extensionUri: vscode.Uri, deps: BridgeDeps): vscod
       localResourceRoots: [extensionUri],
     },
   );
-  panel.webview.html = getHtml(panel.webview, extensionUri);
+  panel.webview.html = getHtml(panel.webview, extensionUri, version);
   const bridge = new ChatBridge(panel.webview, deps);
   bridge.setTitleSink((t) => {
-    panel.title = t ? `Ollama · ${t}` : 'Ollama Code';
+    panel.title = t ? `Ollama · ${t}` : titled;
   });
   bridge.setVisible(panel.visible);
   panel.onDidChangeViewState(() => bridge.setVisible(panel.visible));

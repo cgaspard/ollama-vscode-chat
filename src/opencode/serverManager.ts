@@ -266,16 +266,18 @@ export class OpencodeServerManager {
     try {
       const list = await this.ollama.listModels();
       for (const m of list) {
-        // Per-model context budget: the user's override, else the global
-        // minContextLength, clamped to the model's real maximum. With the /v1
-        // provider this drives OpenCode's `limit.context` — how much context it
-        // packs before compacting, and the meter denominator. It does NOT resize
-        // the Ollama runner itself: Ollama's /v1 endpoint ignores num_ctx and
-        // loads at the server's OLLAMA_CONTEXT_LENGTH. (The native /api provider
-        // honored num_ctx but emits an object finishReason that fails OpenCode's
-        // validation and loops the model, so we can't use it.)
+        // Per-model context window: the user's override, else the global
+        // minContextLength, clamped to the model's real maximum. This is now a
+        // single number with a single meaning — it is sent to Ollama as
+        // `num_ctx` AND declared as OpenCode's `limit.context`, so the window
+        // the runner holds and the budget OpenCode packs against cannot drift
+        // apart.
         const target = this.prefs.ctxOverride(m.id) ?? defaultCtx;
         const ctx = clampContext(target, m.maxContextLength);
+        // Sent to Ollama as /api/chat `options.num_ctx`. The nesting is load-
+        // bearing: ollama-ai-provider-v2 parses providerOptions.ollama as
+        // `{ think?, options? }`, so a flat `{ num_ctx }` is silently dropped
+        // (verified — the model came up at the server default instead).
         models[m.id] = {
           name: m.displayName,
           attachment: !!m.vision,
@@ -289,6 +291,7 @@ export class OpencodeServerManager {
           // <think> blocks before answering (8192 truncated them mid-thought),
           // but still a fraction of the window so input isn't crowded out.
           limit: { context: ctx, output: Math.min(32768, Math.floor(ctx / 4)) },
+          options: { options: { num_ctx: ctx } },
           // Reasoning-effort levels, selectable per message via PromptBody.variant.
           // Declared unconditionally for every model — declaring a variant a model
           // can't use is harmless (only *sending* it errors), and unconditional
@@ -301,24 +304,28 @@ export class OpencodeServerManager {
       logError('could not enumerate Ollama models for config', err);
     }
 
-    // Use OpenCode's bundled `@ai-sdk/openai-compatible` provider against
-    // Ollama's OpenAI-compatible /v1 endpoint.
+    // Use the NATIVE `ollama-ai-provider-v2` against Ollama's own /api endpoint,
+    // pinned to the active server (the provider defaults to localhost).
     //
-    // We pin `options.baseURL` to the active server's `/v1` because the bundled
-    // provider hardcodes http://localhost:11434/v1 and ignores OLLAMA_HOST for
-    // API calls — without this, remote/multi-server hosts 404 with "model not
-    // found" (discovery hits the right host but chat hits localhost).
-    // `includeUsage` makes Ollama stream real token counts (drives the meter).
+    // We were on the OpenAI-compatible /v1 endpoint, which cannot carry a
+    // context window: /v1 has no field for it, and Ollama re-loads the model at
+    // its own default on every request — measured, a model explicitly loaded at
+    // 4096 came back as 40960 after a single two-token /v1 chat. That silently
+    // undid the context the user picked. The native endpoint takes `num_ctx`
+    // per request, so the window we ask for is the window we get.
     //
-    // NOTE: we deliberately do NOT use the native `ollama-ai-provider-v2`
-    // (/api). It would honor per-model num_ctx, but this opencode build rejects
-    // its object-shaped `finishReason` (ZodError in session.processor), which
-    // breaks turn completion and makes the agent loop re-run the model several
-    // times per prompt (duplicate replies). /v1 returns a clean string
-    // finishReason. Consequence: the runner window is set by the Ollama server's
-    // OLLAMA_CONTEXT_LENGTH, not by us; our per-model context drives only
-    // OpenCode's `limit.context` (compaction budget + meter). keep_alive is
-    // applied out-of-band by the bridge's keep-warm poll via /api/generate.
+    // The historical objection to this provider — an object-shaped
+    // `finishReason` that failed OpenCode's validation and looped the agent —
+    // no longer reproduces (provider 4.0.1 on OpenCode 1.17.18 and 1.18.4: no
+    // ZodError, tool calls complete, one turn per prompt).
+    //
+    // Costs, both accepted deliberately:
+    //   - Graded thinking is gone. The provider flattens every effort to a
+    //     boolean `think`, so gpt-oss's low/medium/high is not expressible.
+    //     See src/core/effort.ts.
+    //   - `keep_alive` is embedding-only in this provider, so chat requests
+    //     still cannot carry it. It stays applied out-of-band by the bridge's
+    //     keep-warm poll via /api/generate, exactly as before.
     // MCP servers discovered from .mcp.json / .vscode/mcp.json / VS Code user
     // settings / our own `ollamaCode.mcpServers`. Tokens like ${VAR} are already
     // resolved to literals (OPENCODE_CONFIG_CONTENT is not substituted by
@@ -353,9 +360,9 @@ export class OpencodeServerManager {
       },
       provider: {
         ollama: {
-          npm: '@ai-sdk/openai-compatible',
+          npm: 'ollama-ai-provider-v2',
           name: 'Ollama',
-          options: { baseURL: `${this.ollama.getBaseUrl()}/v1`, includeUsage: true },
+          options: { baseURL: `${this.ollama.getBaseUrl()}/api` },
           ...(Object.keys(models).length ? { models } : {}),
         },
       },
