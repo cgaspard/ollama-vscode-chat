@@ -1,0 +1,22 @@
+version: 0.18.0
+date: 2026-08-08
+highlights:
+  - The context window you pick is now the context window Ollama actually runs with. It used to survive about one request.
+  - Chat went through Ollama's OpenAI-compatible /v1 endpoint, which has no field for a context size - and Ollama re-loads the model at its own default on every request. Measured - a model explicitly loaded at 4096 came back at 40960 after a single two-token chat.
+  - Chat now goes through Ollama's native /api endpoint, which takes `num_ctx` per request. Asked for 32768, held 32768 across multi-turn conversations, tool calls, subagent delegation and images.
+  - Graded thinking is real for models that grade it. On gpt-oss, "low" and "high" now produce genuinely different amounts of reasoning (37 vs 414 characters in testing) instead of collapsing to the same request.
+  - Getting there needed two fixes in the Ollama provider package, so the extension bundles a patched fork. The image fix has been sent upstream (opencomp-eu/ollama-ai-provider-v2#206).
+  - The provider ships inside the extension and is copied into place at startup, so your first prompt never waits on a package download. A local-first tool should not need the internet to start.
+  - The running extension version is now visible at all times, so you can tell at a glance which build you have.
+added:
+  - The extension version appears left of the new chat / history / open-in-tab buttons, in the empty-state title, in the sidebar header, and on the editor tab.
+  - A patched Ollama provider is bundled with the extension and pre-seeded into the managed OpenCode server's package cache before it starts.
+changed:
+  - The per-model context window is now a single number with a single meaning - it is sent to Ollama as `num_ctx` and declared as OpenCode's context limit, so the window the model holds and the budget the agent packs against cannot drift apart.
+  - Reasoning effort is sent as Ollama's native `think` rather than through the OpenAI shim's `reasoning_effort`.
+  - Models whose template grades thinking offer the full Auto/Off/Low/Med/High scale again; models that only think or do not still show Auto/Off/On.
+fixed:
+  - Picking a context window no longer lasts a single request before Ollama silently replaces it with its own default.
+  - Image attachments would have failed outright on the native endpoint - the provider rejected the file data OpenCode hands it. Fixed in the bundled fork and submitted upstream.
+  - The integration test harness could not launch a test VS Code at all on 1.132, which dropped the executable name the old @vscode/test-electron looked for.
+removed: []

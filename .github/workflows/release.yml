@@ -117,6 +117,17 @@ jobs:
       - name: Fetch bundled OpenCode binary for ${{ matrix.target }}
         run: node scripts/fetch-opencode.js ${{ matrix.target }}
 
+      # The Ollama provider ships inside the vsix and is pre-seeded into
+      # OpenCode's package cache at runtime, so a first prompt never waits on
+      # npm. Without this step the vsix has no provider to seed.
+      - name: Stage the bundled Ollama provider
+        run: node scripts/bundle-provider.js
+
+      - name: Verify the provider actually made it into the build
+        run: |
+          test -f opencode-provider/packages/ollama-ai-provider-cgaspard/node_modules/ollama-ai-provider-cgaspard/dist/index.mjs
+          test -d opencode-provider/packages/ollama-ai-provider-cgaspard/node_modules/@ai-sdk/provider
+
       - name: Package ${{ matrix.target }} .vsix
         run: |
           VER="${{ needs.prepare.outputs.version }}"
