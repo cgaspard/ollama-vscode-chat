@@ -1449,12 +1449,12 @@ var OllamaStreamProcessor = class {
     }
   }
   processDelta(delta, controller) {
-    this.processTextContent(delta, controller);
     this.processThinking(delta, controller);
+    this.processTextContent(delta, controller);
     this.processToolCalls(delta, controller);
   }
   processTextContent(delta, controller) {
-    if ((delta == null ? void 0 : delta.content) != null) {
+    if (delta == null ? void 0 : delta.content) {
       if (!this.state.hasTextStarted) {
         controller.enqueue({ type: "text-start", id: this.state.textId });
         this.state.hasTextStarted = true;

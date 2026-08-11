@@ -20,9 +20,12 @@ import { BUILD_PROMPT, PLAN_PROMPT } from './prompts';
 /**
  * The Ollama provider we ship and pre-seed: a patched fork of
  * ollama-ai-provider-v2 (provenance and upstream PR in
- * vendor/<pkg>/package.json). Two fixes matter here — image parts no longer
- * throw on untagged file data, and a graded thinking effort reaches Ollama
- * instead of being flattened to a boolean.
+ * vendor/<pkg>/package.json). Three fixes matter here — image parts no longer
+ * throw on untagged file data, a graded thinking effort reaches Ollama
+ * instead of being flattened to a boolean, and the stream processor no longer
+ * opens the text part on the empty `content: ""` that rides along with every
+ * thinking-phase chunk (which put the reasoning block BELOW the answer in the
+ * chat, since parts render in creation order).
  */
 const BUNDLED_PROVIDER = 'ollama-ai-provider-cgaspard';
 

@@ -1,0 +1,12 @@
+version: 0.19.0
+date: 2026-08-10
+highlights:
+  - Thinking now appears above the answer. Reasoning models rendered their thinking block below the response (and it stayed there); the bundled provider now streams reasoning before text, so the thinking block sits where it belongs.
+  - Bundled OpenCode upgraded 1.17.18 → 1.18.16 — twelve upstream patch releases of fixes, verified end-to-end against local Ollama models with zero changes to existing behavior.
+added: []
+changed:
+  - The bundled OpenCode server is now 1.18.16. Every consumed endpoint and event was diffed old-vs-new (byte-identical API surface) and the full stack was re-verified live — streaming, thinking blocks, tool calls, permission prompts, slash commands, /compact, session history, and the graded thinking-effort control all behave exactly as before.
+  - Upstream niceties in the new server — message history is now ordered by true chronology, repeated /compact keeps earlier tool-call history in summaries instead of dropping it, MCP connections recover better after errors and expired sessions, and transient model-server errors are retried instead of failing the turn.
+fixed:
+  - Reasoning blocks no longer render below the response. Ollama always streams an empty content field alongside thinking deltas, and the bundled provider (now 4.0.1-cgaspard.2) mistook it for the start of the answer — the text block was created first and the thinking block was stuck under it, live and in saved history. New turns now store reasoning before text; sessions recorded before the fix keep their old order.
+removed: []
