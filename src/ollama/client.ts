@@ -1,4 +1,12 @@
 import { ollamaRestRoot } from '../config';
+import {
+  contextFromTags,
+  granularFromShow,
+  needsShow,
+  showCacheKey,
+  tagsCarryCapabilities,
+  type ShowDetail,
+} from '../core/discovery';
 import { ProbeStatus } from '../core/health';
 import { logError } from '../logger';
 
@@ -52,6 +60,12 @@ export class OllamaClient {
   private probe: { startedAt: number; promise: Promise<ProbeStatus> } | undefined;
   /** In-flight model listing, shared by concurrent callers. */
   private listing: Promise<OllamaModel[]> | undefined;
+  /**
+   * Per-model `/api/show` answers, keyed name@digest (see showCacheKey). A
+   * model's capabilities/template only change when it is re-pulled, which
+   * changes its digest — so entries never go stale and never need to expire.
+   */
+  private showCache = new Map<string, ShowDetail>();
 
   constructor(private baseUrl: string) {}
 
@@ -60,6 +74,7 @@ export class OllamaClient {
       // A different server: forget everything we learned about the old one.
       this.probe = undefined;
       this.listing = undefined;
+      this.showCache.clear();
     }
     this.baseUrl = url;
   }
@@ -130,8 +145,8 @@ export class OllamaClient {
   /**
    * List chat-capable models (embeddings filtered out) with capabilities.
    * Concurrent callers (health refresh + a user send + a sibling panel) share
-   * one in-flight request instead of each triggering the /api/tags + /api/ps
-   * + per-model /api/show fan-out.
+   * one in-flight request. On Ollama ≥ 0.30 this costs two requests
+   * (/api/tags + /api/ps); older servers add the per-model /api/show fan-out.
    */
   async listModels(): Promise<OllamaModel[]> {
     if (this.listing) {
@@ -179,15 +194,41 @@ export class OllamaClient {
       // /api/ps unavailable — leave psOk false (loaded-state unknown this round).
     }
 
-    // Per-model capabilities + max context via /api/show (parallel).
+    // Per-model detail. On Ollama ≥ 0.30 the tags rows already carry
+    // capabilities + context length, so `/api/show` is needed only for
+    // thinking-capable models (granularity isn't in tags) — and only once per
+    // name@digest thanks to the cache. Pre-0.30 rows lack inline capabilities
+    // and keep the original show-every-model fan-out.
     const detailed = await Promise.all(
       tagModels.map(async (m) => {
-        const info = await this.showModel(m.name).catch(() => null);
-        const caps: string[] = (info?.capabilities as string[]) ?? [];
-        // /api/show returns the model's prompt template; a reference to
-        // `.ThinkLevel` means the template renders a graded effort level.
-        const granular = typeof info?.template === 'string' && info.template.includes('.ThinkLevel');
-        return { m, caps, maxCtx: maxContextFromInfo(info?.model_info), granular };
+        const modern = tagsCarryCapabilities(m);
+        const tagCaps = modern ? (m.capabilities as string[]) : undefined;
+        const tagCtx = contextFromTags(m);
+        const key = showCacheKey(m);
+        let known = this.showCache.get(key);
+        const wantShow = needsShow({
+          modern,
+          thinking: tagCaps?.includes('thinking') ?? true,
+          hasContext: tagCtx !== undefined,
+          cached: known !== undefined,
+        });
+        if (wantShow) {
+          const info = await this.showModel(m.name).catch(() => null);
+          if (info) {
+            known = {
+              caps: (info.capabilities as string[]) ?? [],
+              granular: granularFromShow(info),
+              maxCtx: maxContextFromInfo(info.model_info),
+            };
+            this.showCache.set(key, known);
+          }
+        }
+        return {
+          m,
+          caps: tagCaps ?? known?.caps ?? [],
+          maxCtx: tagCtx ?? known?.maxCtx,
+          granular: known?.granular ?? false,
+        };
       }),
     );
 

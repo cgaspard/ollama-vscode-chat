@@ -1,0 +1,12 @@
+version: 0.21.0
+date: 2026-08-12
+highlights:
+  - Model discovery now reads capabilities and context length straight from Ollama's model list (Ollama 0.30+), so the periodic health check costs two requests instead of one per model — quieter server logs, faster refreshes.
+  - Bundled OpenCode upgraded 1.18.16 → 1.18.17 — compaction reworked for smaller local models, and transient model-server errors now stop retrying after five attempts instead of hanging the turn forever.
+added: []
+changed:
+  - On Ollama 0.30 and newer, /api/tags supplies each model's capabilities (thinking, tools, vision) and context length inline, so the per-model /api/show fan-out only runs for thinking-capable models — once per model, cached until the model is re-pulled. Older Ollama servers keep the original per-model lookup, unchanged.
+  - Graded thinking-effort detection is future-proofed for the new generation of Ollama models that ship a built-in renderer instead of a prompt template — gpt-oss builds are recognized either way. Verified live against gpt-oss:20b on Ollama 0.32.9.
+  - The bundled OpenCode server is now 1.18.17. /compact keeps recent turns verbatim up to a larger budget and produces clearer summaries on small models; a persistently failing model server now surfaces an error after ~5 retries instead of retrying indefinitely. Full stack re-verified live — streaming, thinking order, tool calls, permission prompts, slash commands, /compact, and the graded thinking-effort control all behave as before.
+fixed: []
+removed: []
