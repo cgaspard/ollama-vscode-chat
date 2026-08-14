@@ -24,6 +24,7 @@ import {
   resolveLevel,
   variantForLevel,
 } from '../core/effort';
+import { type PermissionMode, normalizePermissionMode } from '../core/permission';
 import { ConnectResult, SelfHealer } from '../core/reconnect';
 import { ProbeStatus } from '../core/health';
 import { pickModel } from '../core/models';
@@ -600,6 +601,9 @@ export class ChatBridge {
         case 'permission':
           await this.client?.respondPermission(msg.sessionID, msg.permissionID, msg.response);
           break;
+        case 'setPermissionMode':
+          await this.setPermissionMode(msg.mode);
+          break;
         case 'questionReply':
           await this.client?.replyQuestion(msg.requestID, msg.answers);
           break;
@@ -670,6 +674,25 @@ export class ChatBridge {
     }
   }
 
+  /**
+   * Persist a new tool-approval posture. Writing the setting fires the
+   * extension's onDidChangeConfiguration listener, which disposes the managed
+   * server; the next request self-heals onto a fresh spawn with the new
+   * ruleset baked in (the ruleset lives in OPENCODE_CONFIG_CONTENT, so a
+   * respawn is the only way to change it for every session, subagents
+   * included). Workspace-scoped when a folder is open so that trusting a
+   * workspace with "bypass" doesn't silently carry into every other project.
+   */
+  private async setPermissionMode(mode: PermissionMode): Promise<void> {
+    const value = normalizePermissionMode(mode);
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration('ollamaCode').update('permissionMode', value, target);
+    log(`permission mode set to ${value} (server respawns on next request)`);
+    this.post({ type: 'permissionMode', mode: value });
+  }
+
   private async init(): Promise<ConnectResult> {
     this.startHealthPoll();
     if (this.connecting) {
@@ -711,6 +734,7 @@ export class ChatBridge {
         keepAlive: this.keepAlive(),
         agents: [],
         defaultEffort: cfg.defaultThinkingEffort,
+        permissionMode: cfg.permissionMode,
       });
       this.post({ type: 'status', text: `Can't reach Ollama at ${active.url}`, kind: 'warn' });
       log(`doInit: Ollama unreachable at ${active.url}`);
@@ -741,6 +765,7 @@ export class ChatBridge {
         keepAlive: this.keepAlive(),
         agents: [],
         defaultEffort: cfg.defaultThinkingEffort,
+        permissionMode: cfg.permissionMode,
       });
       return 'failed';
     }
@@ -775,6 +800,7 @@ export class ChatBridge {
       keepAlive: this.keepAlive(),
       agents,
       defaultEffort: cfg.defaultThinkingEffort,
+      permissionMode: cfg.permissionMode,
     });
 
     await this.sendSessions();

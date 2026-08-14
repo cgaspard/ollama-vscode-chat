@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ALL_LEVELS, type EffortLevel } from './core/effort';
+import { normalizePermissionMode, type PermissionMode } from './core/permission';
 
 /** Settings.json is hand-editable, so an unknown level must not reach the wire. */
 function normalizeEffort(value: unknown): EffortLevel {
@@ -20,6 +21,8 @@ export interface ExtensionConfig {
   defaultModel: string;
   /** Starting reasoning effort for models with no per-model choice stored. */
   defaultThinkingEffort: EffortLevel;
+  /** Tool-approval posture baked into the OpenCode config at spawn. */
+  permissionMode: PermissionMode;
   /** Default agent name. Free-form: user-defined agents are discovered at runtime. */
   agent: string;
   autoEnsureContext: boolean;
@@ -42,6 +45,7 @@ export function getConfig(): ExtensionConfig {
     defaultModel: (cfg.get<string>('defaultModel') ?? '').trim(),
     agent: (cfg.get<string>('agent') ?? 'build').trim() || 'build',
     defaultThinkingEffort: normalizeEffort(cfg.get<string>('defaultThinkingEffort')),
+    permissionMode: normalizePermissionMode(cfg.get<string>('permissionMode')),
     autoEnsureContext: cfg.get<boolean>('autoEnsureContext') ?? true,
     minContextLength: cfg.get<number>('minContextLength') ?? 32768,
     keepAlive: (cfg.get<string>('keepAlive') ?? '30m').trim(),

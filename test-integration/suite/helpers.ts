@@ -45,6 +45,11 @@ export async function classes(selector: string): Promise<string[]> {
   return (await exec({ __test__: 'query', selector, prop: 'class' })).values;
 }
 
+/** Trimmed textContent of every match. */
+export async function allText(selector: string): Promise<string[]> {
+  return (await exec({ __test__: 'query', selector, prop: 'text' })).values;
+}
+
 /** Set the composer input value and fire its input event (drives autocomplete). */
 export async function setInput(value: string): Promise<void> {
   await exec({ __test__: 'setInput', value });
@@ -53,6 +58,11 @@ export async function setInput(value: string): Promise<void> {
 /** Dispatch a real click on the first match. Returns false if nothing matched. */
 export async function click(selector: string): Promise<boolean> {
   return (await exec({ __test__: 'click', selector })).ok;
+}
+
+/** Set a <select>'s value and fire change (drives picker controls). */
+export async function setSelect(selector: string, value: string): Promise<boolean> {
+  return (await exec({ __test__: 'setSelect', selector, value })).ok;
 }
 
 /** Poll until the predicate over a selector's count holds (or time out). */

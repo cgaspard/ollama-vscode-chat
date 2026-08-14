@@ -25,6 +25,8 @@ import {
   levelsForModel,
   resolveLevel,
 } from '../core/effort';
+import { humanizeError } from '../core/errors';
+import { type PermissionMode, permissionModeLabel } from '../core/permission';
 import {
   formatRate,
   formatThinkingLabel,
@@ -80,6 +82,8 @@ interface State {
   effortByModel: Record<string, EffortLevel>;
   /** Configured fallback when a model has no stored choice. */
   defaultEffort: EffortLevel;
+  /** Tool-approval posture (default / strict / bypass) — host-owned setting. */
+  permissionMode: PermissionMode;
   /** Whether reasoning blocks are *displayed* — independent of generation depth. */
   showReasoning: boolean;
   pendingImages: UiImage[];
@@ -117,6 +121,7 @@ const state: State = {
   ollamaConnected: false,
   effortByModel: persisted.effortByModel ?? {},
   defaultEffort: 'auto',
+  permissionMode: 'default',
   // Migrate the old single boolean: it drove display as well as generation, so
   // an existing "thinking off" user keeps reasoning hidden.
   showReasoning: persisted.showReasoning ?? persisted.thinking ?? true,
@@ -149,6 +154,7 @@ const toolCollapsed = new Map<string, boolean>(); // partID -> collapsed?
 // messageID so repeated calls update one card in place instead of stacking.
 const todoCards = new Map<string, HTMLElement>(); // messageID -> checklist card el
 const todoCollapsed = new Map<string, boolean>(); // messageID -> user-forced collapse (unset = auto)
+let lastErrorText = ''; // dedup repeated error bubbles within a turn
 let turnTruncated = false; // the current turn hit its output-token budget (finish reason 'length')
 let closeMenuOnLoad = false; // user hit Load from the menu — close it once the load returns
 // Generation-speed tracking. Accounting lives in ../core/genrate (pure + tested):
@@ -231,6 +237,7 @@ let overflowMenuEl!: HTMLElement;
 let overflowItems: Array<{ el: HTMLElement; home: HTMLElement; anchor: Node }> = [];
 let attachmentsEl!: HTMLElement;
 let agentSelect!: HTMLSelectElement;
+let permSelect!: HTMLSelectElement;
 let statusEl!: HTMLElement;
 let historyOverlay!: HTMLElement;
 let historyList!: HTMLElement;
@@ -317,6 +324,11 @@ function build(): void {
               <span class="model-btn-label">Model</span>
               <span class="caret">${icon.caret}</span>
             </button>
+            <select id="perm-select" class="picker perm" title="Permissions — when the agent asks for approval">
+              <option value="default">Ask: risky only</option>
+              <option value="strict">Ask: always</option>
+              <option value="bypass">Bypass all</option>
+            </select>
             <select id="agent-select" class="picker agent" title="Agent — who drives the turn"></select>
             <button id="send" class="send-btn" title="Send">${icon.send}</button>
           </div>
@@ -429,7 +441,7 @@ function build(): void {
   // off-screen. Hide-order: first entries collapse first.
   overflowBtn = document.getElementById('overflow-btn') as HTMLButtonElement;
   overflowMenuEl = document.getElementById('overflow-menu')!;
-  overflowItems = ['server-btn', 'agent-select', 'btn-goal', 'btn-think', 'tool-sep', 'btn-attach', 'ctxfile']
+  overflowItems = ['perm-select', 'server-btn', 'agent-select', 'btn-goal', 'btn-think', 'tool-sep', 'btn-attach', 'ctxfile']
     .map((id) => document.getElementById(id))
     .filter((el): el is HTMLElement => !!el)
     .map((el) => {
@@ -445,6 +457,7 @@ function build(): void {
   new ResizeObserver(() => layoutComposer()).observe(composerRow);
   layoutComposer();
   agentSelect = document.getElementById('agent-select') as HTMLSelectElement;
+  permSelect = document.getElementById('perm-select') as HTMLSelectElement;
   statusEl = document.getElementById('status')!;
   historyOverlay = document.getElementById('history-overlay')!;
   historyList = document.getElementById('history-list')!;
@@ -678,9 +691,34 @@ function build(): void {
     post({ type: 'selectAgent', agent: state.agent });
     renderMeter();
   });
+  permSelect.addEventListener('change', () => {
+    const mode = permSelect.value as PermissionMode;
+    state.permissionMode = mode;
+    // The host persists the setting and acks with 'permissionMode' (the chip
+    // renders on the ack, so settings.json edits get the same feedback).
+    post({ type: 'setPermissionMode', mode });
+  });
   // Paint the composer button in its correct mode before any message arrives —
   // otherwise it defaults to an active Send with no model loaded.
   syncSendEnabled();
+}
+
+/** Reflect the host-owned permission mode in the picker (no chip). */
+function renderPermissionMode(): void {
+  state.permissionMode = state.permissionMode ?? 'default';
+  permSelect.value = state.permissionMode;
+  permSelect.classList.toggle('bypass', state.permissionMode === 'bypass');
+}
+
+function permissionModeChip(mode: PermissionMode): string {
+  const label = `Permissions: ${permissionModeLabel(mode)}`;
+  if (mode === 'bypass') {
+    return `🔓 ${label} — every tool call is auto-approved, including shell commands. Applies from the next message (the agent server restarts).`;
+  }
+  if (mode === 'strict') {
+    return `🔒 ${label} — every tool call needs your approval. Applies from the next message (the agent server restarts).`;
+  }
+  return `${label} — only risky actions (outside the workspace, .env files) need approval. Applies from the next message (the agent server restarts).`;
 }
 
 function autoGrow(): void {
@@ -2221,6 +2259,7 @@ function clearConversation(): void {
     .forEach((n) => n.remove());
   state.realTokens = 0;
   state.compacted = false;
+  lastErrorText = '';
   autoScrollEnabled = true; // fresh conversation starts pinned to the bottom
   toggleWelcome();
 }
@@ -2942,9 +2981,24 @@ function appendGenStat(): void {
 
 function showError(message: string): void {
   hideWorking();
+  const text = (message || '').trim() || 'Something went wrong.';
+  // Don't stack duplicate bubbles — a dropped connection often arrives as both
+  // a session.error and a message error in the same turn.
+  if (text === lastErrorText) {
+    return;
+  }
+  lastErrorText = text;
+  // A user-initiated stop is not a failure. It also arrives through several
+  // paths at once (the message's error, session.error, the prompt call's
+  // rejection) — humanizeError collapses them all to this exact text, so the
+  // dedup above guarantees a single quiet chip instead of stacked red alerts.
+  if (text === 'Stopped.') {
+    addSysChip('⏹ Stopped.');
+    return;
+  }
   const el = document.createElement('div');
   el.className = 'error-bubble';
-  el.textContent = message;
+  el.textContent = text;
   messagesEl.appendChild(el);
   toggleWelcome();
   scrollToBottom();
@@ -2959,6 +3013,7 @@ function setBusy(busy: boolean): void {
   state.busy = busy;
   sendBtn.classList.toggle('busy', busy);
   if (busy) {
+    lastErrorText = ''; // new turn — allow a fresh error to surface
     turnTruncated = false; // fresh turn — clear any prior truncation flag
     turnRate = newTurnRate(); // reset generation-speed tracking for the new turn
     showWorking('Working…');
@@ -3023,6 +3078,7 @@ function setCompacting(active: boolean): void {
   sendBtn.disabled = active;
   document.body.classList.toggle('compacting', active);
   if (active) {
+    lastErrorText = '';
     showWorking('Compacting conversation…');
   } else {
     hideWorking();
@@ -3152,8 +3208,7 @@ function renderConversation(messages: MessageWithParts[]): void {
       }
     }
     if (m.info.error) {
-      const err: any = m.info.error;
-      showError(err?.data?.message ?? err?.message ?? 'Error');
+      showError(humanizeError(m.info.error, { subject: 'Ollama' }));
     }
   }
   state.realTokens = lastUsed;
@@ -3202,7 +3257,7 @@ function handleEvent(event: OpencodeEvent): void {
           renderMeter();
         }
         if (info.error) {
-          showError(info.error?.data?.message ?? info.error?.message ?? 'Error');
+          showError(humanizeError(info.error, { subject: 'Ollama' }));
         }
       }
       break;
@@ -3255,8 +3310,7 @@ function handleEvent(event: OpencodeEvent): void {
       }
       break;
     case 'session.error': {
-      const err = p.error;
-      showError(err?.data?.message ?? err?.message ?? 'Session error');
+      showError(humanizeError(p.error, { subject: 'Ollama' }));
       setBusy(false);
       break;
     }
@@ -3281,8 +3335,10 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.minContext = msg.minContext;
       state.agents = msg.agents ?? [];
       state.defaultEffort = msg.defaultEffort ?? 'auto';
+      state.permissionMode = msg.permissionMode ?? 'default';
       applyEffort(); // levels depend on the selected model's declared capability
       state.keepAlive = msg.keepAlive;
+      renderPermissionMode();
       renderModels();
       renderMeter();
       renderServers();
@@ -3437,6 +3493,11 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
         addSysChip(`Goal paused (${why}) — ${msg.reason ?? ''}\nResume from the goal bar, or /goal clear to end it.`);
       }
       break;
+    case 'permissionMode':
+      state.permissionMode = msg.mode;
+      renderPermissionMode();
+      addSysChip(permissionModeChip(msg.mode));
+      break;
     case 'error':
       showError(msg.message);
       setBusy(false);
@@ -3483,6 +3544,15 @@ function installTestHook(): void {
         inputEl.value = String(m.value ?? '');
         inputEl.dispatchEvent(new Event('input', { bubbles: true }));
         reply({ ok: true });
+      } else if (m.__test__ === 'setSelect') {
+        // Set a <select>'s value and fire change, the way a user picking an
+        // option would (click() can't open a native dropdown in tests).
+        const el = document.querySelector(m.selector as string) as HTMLSelectElement | null;
+        if (el) {
+          el.value = String(m.value ?? '');
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        reply({ ok: !!el });
       } else {
         reply({ error: `unknown __test__ op: ${m.__test__}` });
       }

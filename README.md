@@ -19,7 +19,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **Reasoning** blocks for thinking-capable models (collapsible)
 - **Agent tools** — file reads/edits, shell, search — surfaced as collapsible tool cards
 - **MCP servers** — extend the agent with [Model Context Protocol](https://modelcontextprotocol.io) tools; servers you already configured for **Claude Code** (`.mcp.json`) or **VS Code** (`.vscode/mcp.json`) are picked up automatically. Type `/mcp` to see their live status
-- **Permission prompts** — Allow once / Allow always / Deny, inline
+- **Permission prompts** — Allow once / Allow always / Deny, inline; plus a permissions picker in the composer to set how often the agent asks: *Ask: risky only* (the default — outside-the-workspace access and `.env` reads prompt), *Ask: always* (approve every tool call), or *Bypass all* (never ask — for workspaces you trust)
 - **Model manager** — load / eject Ollama models from the composer, with loaded state, context size, and capability badges (👁 vision / 🔧 tools)
 - **Multi-server** — register, switch, edit, and remove Ollama servers; offline mode with a connection banner
 - **Context meter** with compaction indicator, **thinking toggle**, **image attachments** for vision models, and the **open file** attached as excludable context
