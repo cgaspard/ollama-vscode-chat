@@ -314,9 +314,9 @@ function build(): void {
           <div class="composer-tools">
             <button id="btn-add" class="tool-pill icon-only" title="Add context — attach an image, include the open file">${icon.plus}</button>
             <button id="btn-help" class="tool-pill icon-only" title="Slash commands — everything you can type">${icon.help}</button>
-            <span class="ctx-label" id="ctx-tip"></span>
           </div>
           <div class="composer-right">
+            <span class="ctx-label" id="ctx-tip"></span>
             <button id="model-btn" class="model-btn" title="Model &amp; server — switch, load / eject">
               <span class="model-dot"></span>
               <span class="model-btn-label">Model</span>

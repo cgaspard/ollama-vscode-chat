@@ -888,8 +888,11 @@ body {
 /* Sits in the composer row beside the buttons — it used to be absolutely
    positioned over the textarea, where it covered the tail of the first line. */
 .ctx-label {
-  flex: 0 1 auto;
+  /* Sits with the model chip it describes, and is the first thing to give way
+     when the row runs out of room. */
+  flex: 0 5 auto;
   min-width: 0;
+  margin-right: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
