@@ -111,6 +111,9 @@ export class ChatBridge {
   /** Last mapped model list, so the send path can read declared capabilities. */
   private lastModels: UiModel[] = [];
   private eventAbort: AbortController | undefined;
+  /** The client the live event stream is bound to, so a respawned server (new
+   * port) can be detected and re-subscribed. */
+  private streamingClient: OpencodeClient | undefined;
   private disposed = false;
   private connected = false;
   private connecting = false;
@@ -336,6 +339,7 @@ export class ChatBridge {
   private teardownConnection(disposeServer: boolean): void {
     this.eventAbort?.abort();
     this.eventAbort = undefined;
+    this.streamingClient = undefined;
     this.client = undefined;
     if (disposeServer) {
       this.deps.server.dispose();
@@ -768,6 +772,14 @@ export class ChatBridge {
         permissionMode: cfg.permissionMode,
       });
       return 'failed';
+    }
+    // A restart moves the server to a new random port. The old event stream is
+    // still retrying the dead one, and startEventStream() would no-op because
+    // eventAbort is still set — leaving the panel connected but eventless.
+    if (this.streamingClient && this.streamingClient !== started.client) {
+      this.eventAbort?.abort();
+      this.eventAbort = undefined;
+      this.streamingClient = undefined;
     }
     this.client = started.client;
 
@@ -2254,6 +2266,7 @@ export class ChatBridge {
     if (this.eventAbort || !this.client) {
       return;
     }
+    this.streamingClient = this.client;
     this.eventAbort = new AbortController();
     void this.client.subscribeEvents((event) => this.relayEvent(event), this.eventAbort.signal);
   }
