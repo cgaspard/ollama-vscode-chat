@@ -18,8 +18,10 @@ changed:
   - The status line and the Working indicator merged into one activity strip, so a running turn no longer stacks two rows above the input.
   - The context meter became a 2px edge on the composer itself. It stays ambient below 70% and announces itself with a label and warning color above it.
   - The per-turn stat line trimmed to four fields; the agent name, grand total and thinking share moved to its tooltip. Both it and the context meter now use the same 1024-base formatting, so one token count no longer renders as two different numbers.
+  - The context readout sits on the composer card's top-right line, above where you type, and is laid out in normal flow so it can never overlap a long message.
   - Reasoning blocks restored from a saved conversation open collapsed and labelled with how long the model thought, instead of expanded and still saying "Thinking...".
 fixed:
+  - The panel could go quiet after changing permissions, the context size, or adding an agent. Those settings restart the local agent server, which comes back on a new port, and the event stream kept retrying the old one — so the panel looked connected with a model loaded but never received another event. It now re-subscribes to the new server as soon as it comes back.
   - The permissions picker used to be the first control to vanish into the overflow menu on a narrow panel, hiding the one setting that most deserves to stay visible. There is no overflow menu now, and the mode rides the chip.
   - Popover shadows, selection highlights and badge backgrounds used hardcoded fallbacks that ignored the active theme; they now follow theme tokens and behave in light themes.
   - Only the last message of a turn had its reasoning collapsed, so earlier blocks in a multi-step turn stayed open forever.
