@@ -16,13 +16,13 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 
 - **Chat panel** in the Activity Bar / secondary side bar (and "Open in Editor Tab" for parallel conversations)
 - **Streaming** responses with a Claude-style timeline — thinking, tool steps, answer
-- **Reasoning** blocks for thinking-capable models (collapsible)
-- **Agent tools** — file reads/edits, shell, search — surfaced as collapsible tool cards
+- **Reasoning** blocks for thinking-capable models — folded away with how long the model thought once a turn ends; *Show reasoning* in the behavior menu hides them entirely
+- **Agent tools** — file reads/edits, shell, search — surfaced as a quiet timeline: one row per call, timestamped, expandable only when there's a payload (edits open a diff)
 - **MCP servers** — extend the agent with [Model Context Protocol](https://modelcontextprotocol.io) tools; servers you already configured for **Claude Code** (`.mcp.json`) or **VS Code** (`.vscode/mcp.json`) are picked up automatically. Type `/mcp` to see their live status
 - **Permission prompts** — Allow once / Allow always / Deny, inline; plus a permissions picker in the composer: *Auto* (the default — safe actions run on their own; outside-the-workspace access and `.env` reads ask first), *Manual* (every tool call asks), or *Bypass* (nothing asks — for workspaces you trust)
 - **Model manager** — load / eject Ollama models from the composer, with loaded state, context size, and capability badges (👁 vision / 🔧 tools)
 - **Multi-server** — register, switch, edit, and remove Ollama servers; offline mode with a connection banner
-- **Context meter** with compaction indicator, **thinking toggle**, **image attachments** for vision models, and the **open file** attached as excludable context
+- **Context meter** with compaction indicator, a **Thinking** slider in the behavior menu, and a **+** menu carrying **image attachments** for vision models plus the **open file** as excludable context
 - **Session history** — persistent, resumable, auto-named; delete one or clear all
 - **Auto-context** — loads the selected model with an adequate `num_ctx` so OpenCode's large system prompt doesn't overflow Ollama's small default window
 
