@@ -62,7 +62,7 @@ describe('v0.5.2 webview features', function () {
   describe('model picker', () => {
     it('disambiguates models and shows the identity line', async () => {
       await click('#model-btn');
-      await waitFor('.model-row', (n) => n >= 2);
+      await waitFor('#model-menu-list .model-row', (n) => n >= 2);
       const idents = await classes('.model-ident');
       assert.ok(idents.length >= 1, 'identity lines should render');
       const firstIdent = await text('.model-ident');

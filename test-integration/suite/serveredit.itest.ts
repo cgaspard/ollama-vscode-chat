@@ -33,8 +33,8 @@ describe('server editing', function () {
     });
     await postServers();
     // The menu list only renders while the menu is open.
-    assert.ok(await click('#server-btn'), 'server menu button should be clickable');
-    await waitFor('#server-menu:not(.hidden)', (n) => n === 1);
+    assert.ok(await click('#model-btn'), 'model & server menu button should be clickable');
+    await waitFor('#model-menu:not(.hidden)', (n) => n === 1);
     await postServers(); // re-render rows now that the menu is open
   });
 
@@ -54,8 +54,8 @@ describe('server editing', function () {
     assert.strictEqual(await attr('#server-edit-url', 'value'), 'http://192.168.10.10:11434');
   });
 
-  it('opening the overlay closes the server menu behind it', async () => {
-    assert.strictEqual(await count('#server-menu:not(.hidden)'), 0);
+  it('opening the overlay closes the combined model menu behind it', async () => {
+    assert.strictEqual(await count('#model-menu:not(.hidden)'), 0);
   });
 
   it('cancel closes the overlay', async () => {

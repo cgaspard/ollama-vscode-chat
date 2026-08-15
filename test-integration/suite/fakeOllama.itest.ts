@@ -94,8 +94,8 @@ describe('load against a fake Ollama (real captured behavior)', function () {
 
     // Open the model menu (rows only render while it's open), then click Load.
     await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 1, 8000);
-    await click('.model-row .model-action.load');
+    await waitFor('#model-menu-list .model-row', (n) => n >= 1, 8000);
+    await click('#model-menu-list .model-row .model-action.load');
     // Spinner while the load request blocks…
     await waitFor('.model-action.busy', (n) => n >= 1, 5000);
     // …then a ready Send once the load completes (done_reason:"load").
@@ -113,8 +113,8 @@ describe('load against a fake Ollama (real captured behavior)', function () {
 
     await openPanel(); // fresh state
     await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 1, 8000);
-    await click('.model-row .model-action.load');
+    await waitFor('#model-menu-list .model-row', (n) => n >= 1, 8000);
+    await click('#model-menu-list .model-row .model-action.load');
     await waitFor('.model-action.busy', (n) => n >= 1, 5000);
     // The load returning is authoritative — Send must become ready even though
     // ps never lists the model (loadSettled marks it loaded; mergeModels keeps it).
@@ -130,8 +130,8 @@ describe('load against a fake Ollama (real captured behavior)', function () {
     psAppearsAfterLoad = false;
     await openPanel(); // fresh panel/state
     await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 1, 8000);
-    await click('.model-row .model-action.load');
+    await waitFor('#model-menu-list .model-row', (n) => n >= 1, 8000);
+    await click('#model-menu-list .model-row .model-action.load');
     await waitFor('.model-action.busy', (n) => n >= 1, 5000);
     // The spinner must clear (load settled with an error) rather than hang.
     await waitFor('.model-action.busy', (n) => n === 0, 12000);
