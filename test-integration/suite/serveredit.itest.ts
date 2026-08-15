@@ -32,10 +32,26 @@ describe('server editing', function () {
       minContext: 32768,
     });
     await postServers();
-    // The menu list only renders while the menu is open.
-    assert.ok(await click('#server-btn'), 'server menu button should be clickable');
-    await waitFor('#server-menu:not(.hidden)', (n) => n === 1);
+    // The menu list only renders while the menu is open. Ensure-open rather
+    // than assume-toggle: a prior suite may have left the menu open, in which
+    // case the first click closes it.
+    assert.ok(await click('#model-btn'), 'model & server menu button should be clickable');
+    try {
+      await waitFor('#model-menu:not(.hidden)', (n) => n === 1, 1500);
+    } catch {
+      assert.ok(await click('#model-btn'), 'model & server menu button should be clickable (retry)');
+      await waitFor('#model-menu:not(.hidden)', (n) => n === 1);
+    }
     await postServers(); // re-render rows now that the menu is open
+  });
+
+  after(async () => {
+    // Close the combined menu so later suites' toggle clicks start from a
+    // known-closed state (menu state persists across suites in the shared
+    // webview).
+    if (await count('#model-menu:not(.hidden)')) {
+      await click('#model-btn');
+    }
   });
 
   it('every server row has an edit button', async () => {
@@ -54,8 +70,8 @@ describe('server editing', function () {
     assert.strictEqual(await attr('#server-edit-url', 'value'), 'http://192.168.10.10:11434');
   });
 
-  it('opening the overlay closes the server menu behind it', async () => {
-    assert.strictEqual(await count('#server-menu:not(.hidden)'), 0);
+  it('opening the overlay closes the combined model menu behind it', async () => {
+    assert.strictEqual(await count('#model-menu:not(.hidden)'), 0);
   });
 
   it('cancel closes the overlay', async () => {

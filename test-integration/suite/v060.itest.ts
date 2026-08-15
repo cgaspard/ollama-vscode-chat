@@ -51,13 +51,12 @@ describe('v0.6.0 webview features', function () {
       assert.ok(hidden[0]?.includes('hidden'), 'attachments row should start hidden');
     });
 
-    it('shows a quiet inline file reference, not a filled pill', async () => {
+    it('lists the open file as a toggleable row in the add-context menu', async () => {
       await post({ type: 'activeFile', path: 'src/app.js', chars: 1200 });
-      await waitFor('#ctxfile:not(.hidden)', (n) => n === 1);
-      assert.strictEqual(await text('#ctxfile-name'), 'app.js', 'shows the basename');
-      const cls = await attr('#ctxfile', 'class');
-      assert.ok(cls?.includes('ctxref'), 'uses the quiet ctxref style');
-      assert.ok(!cls?.includes('tool-pill'), 'is no longer a filled tool-pill');
+      await waitFor('#menu-ctxfile:not(.hidden)', (n) => n === 1);
+      assert.strictEqual(await text('#menu-ctxfile-meta'), 'app.js', 'shows the basename');
+      const cls = await attr('#menu-ctxfile', 'class');
+      assert.ok(cls?.includes('menu-row'), 'renders as an add-context menu row');
     });
   });
 
@@ -68,8 +67,10 @@ describe('v0.6.0 webview features', function () {
         selection: { path: 'src/app.js', startLine: 14, endLine: 19, chars: 120 },
       });
       // The pill was removed by design (selection is always-on, no opt-out UI):
-      // no #ctxsel element may exist, with or without an active selection.
+      // no #ctxsel element may exist, with or without an active selection. The
+      // only surface is the display-only info row in the add-context menu.
       assert.strictEqual(await count('#ctxsel'), 0, 'no selection pill element');
+      assert.strictEqual(await count('#menu-ctxsel:not(.hidden)'), 1, 'the add-context menu shows the info row');
     });
 
     it('clearing the selection is also silent (no pill appears)', async () => {

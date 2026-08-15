@@ -81,8 +81,8 @@ describe('Send gating + Load CTA', function () {
   it('shows progress + a cancel control during a long load', async () => {
     await post({ type: 'init', models: MODELS, currentModel: 'qwen3:27b', agent: 'build', cwd: '/tmp', serverReady: true, ollamaConnected: true, minContext: 32768, keepAlive: '30m' });
     await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 2);
-    await click('.model-row .model-action.load');
+    await waitFor('#model-menu-list .model-row', (n) => n >= 2);
+    await click('#model-menu-list .model-row .model-action.load');
     // Host streams progress for an in-flight (minutes-long) load.
     await post({ type: 'loadProgress', modelID: 'qwen3:27b', elapsedSec: 95, note: 'Large models can take a few minutes to load.' });
     await waitFor('.model-action.busy', (n) => n >= 1);
@@ -115,17 +115,19 @@ describe('Send gating + Load CTA', function () {
       currentModel: 'qwen3:27b',
     });
     await click('#model-btn');
-    await waitFor('.model-row', (n) => n >= 1);
-    // Initially the loaded model shows only Eject, no Reload.
-    assert.strictEqual(await count('.model-action.reload'), 0, 'no Reload while ctx matches what is loaded');
-    assert.strictEqual(await count('.model-action.eject'), 1, 'loaded model shows Eject');
+    await waitFor('#model-menu-list .model-row', (n) => n >= 1);
+    // Initially the loaded model shows only Eject, no Reload. Scope to the
+    // model list — the combined menu's server rows reuse .model-action.eject
+    // for their remove button.
+    assert.strictEqual(await count('#model-menu-list .model-action.reload'), 0, 'no Reload while ctx matches what is loaded');
+    assert.strictEqual(await count('#model-menu-list .model-action.eject'), 1, 'loaded model shows Eject');
     // Pick a DIFFERENT context chip — scope to #ctx-presets (keep-alive chips
     // reuse .ctx-preset, so an unscoped selector is ambiguous).
     await click('#ctx-presets .ctx-preset:not(.active)');
     // Reload appears — the change is offered, NOT auto-applied — and Eject stays.
-    await waitFor('.model-action.reload', (n) => n === 1);
-    assert.strictEqual(await count('.model-action.reload'), 1, 'changing ctx offers Reload');
-    assert.strictEqual(await count('.model-action.eject'), 1, 'Eject remains available alongside Reload');
+    await waitFor('#model-menu-list .model-action.reload', (n) => n === 1);
+    assert.strictEqual(await count('#model-menu-list .model-action.reload'), 1, 'changing ctx offers Reload');
+    assert.strictEqual(await count('#model-menu-list .model-action.eject'), 1, 'Eject remains available alongside Reload');
   });
 });
 
