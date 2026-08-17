@@ -1,8 +1,8 @@
 {
   "name": "ollama-code",
   "displayName": "Ollama Code",
-  "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex\u2013style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
-  "version": "0.26.0",
+  "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
+  "version": "0.26.1",
   "publisher": "cgaspard",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -127,7 +127,7 @@
         "ollamaCode.agent": {
           "type": "string",
           "default": "build",
-          "description": "Agent to select by default. 'build' edits your code; 'plan' is read-only. Any agent you define in .opencode/agent/*.md (or ~/.config/opencode/agent/) can also be named here \u2014 it appears in the picker after the OpenCode server restarts."
+          "description": "Agent to select by default. 'build' edits your code; 'plan' is read-only. Any agent you define in .opencode/agent/*.md (or ~/.config/opencode/agent/) can also be named here — it appears in the picker after the OpenCode server restarts."
         },
         "ollamaCode.autoEnsureContext": {
           "type": "boolean",
@@ -143,7 +143,7 @@
         "ollamaCode.keepAlive": {
           "type": "string",
           "default": "30m",
-          "description": "Default Ollama keep_alive \u2014 how long a model stays loaded after use. Use a duration like '5m', '30m', '1h', '8760h' (~forever), or '0' to unload after each use. Also settable per session from the model menu."
+          "description": "Default Ollama keep_alive — how long a model stays loaded after use. Use a duration like '5m', '30m', '1h', '8760h' (~forever), or '0' to unload after each use. Also settable per session from the model menu."
         },
         "ollamaCode.healthCheckSeconds": {
           "type": "number",
@@ -155,7 +155,7 @@
         "ollamaCode.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "MCP (Model Context Protocol) servers to make available to the agent, as a map of `name \u2192 server`. Each server is either a local (stdio) command or a remote (http/sse) URL.\n\nServers configured for **Claude Code** (`.mcp.json` at the workspace root) and **VS Code Copilot** (`.vscode/mcp.json` and the user `mcp` setting) are also discovered automatically \u2014 use this setting to add servers specific to Ollama Code, or to override a discovered one. Entries here take precedence on a name collision.\n\nLocal (stdio) example:\n```json\n{\n  \"playwright\": { \"command\": \"npx\", \"args\": [\"-y\", \"@playwright/mcp@latest\"] }\n}\n```\nRemote (http/sse) example:\n```json\n{\n  \"docs\": { \"type\": \"http\", \"url\": \"https://example.com/mcp\", \"headers\": { \"Authorization\": \"Bearer ${MY_TOKEN}\" } }\n}\n```\n`${VAR}` references are resolved from the environment before launch. Set `\"enabled\": false` to keep a server defined but off. Note: each MCP server adds its tool schemas to the model's context, which is limited on local models \u2014 enable only what you need.",
+          "markdownDescription": "MCP (Model Context Protocol) servers to make available to the agent, as a map of `name → server`. Each server is either a local (stdio) command or a remote (http/sse) URL.\n\nServers configured for **Claude Code** (`.mcp.json` at the workspace root) and **VS Code Copilot** (`.vscode/mcp.json` and the user `mcp` setting) are also discovered automatically — use this setting to add servers specific to Ollama Code, or to override a discovered one. Entries here take precedence on a name collision.\n\nLocal (stdio) example:\n```json\n{\n  \"playwright\": { \"command\": \"npx\", \"args\": [\"-y\", \"@playwright/mcp@latest\"] }\n}\n```\nRemote (http/sse) example:\n```json\n{\n  \"docs\": { \"type\": \"http\", \"url\": \"https://example.com/mcp\", \"headers\": { \"Authorization\": \"Bearer ${MY_TOKEN}\" } }\n}\n```\n`${VAR}` references are resolved from the environment before launch. Set `\"enabled\": false` to keep a server defined but off. Note: each MCP server adds its tool schemas to the model's context, which is limited on local models — enable only what you need.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -229,7 +229,7 @@
             "Moderate reasoning",
             "Maximum reasoning"
           ],
-          "description": "Starting reasoning effort for models you haven't set one for. Only models Ollama reports as thinking-capable show the control at all \u2014 sending an effort to a model without it is an error, not a no-op. Models whose template doesn't grade effort collapse low/medium/high to a single 'On'."
+          "description": "Starting reasoning effort for models you haven't set one for. Only models Ollama reports as thinking-capable show the control at all — sending an effort to a model without it is an error, not a no-op. Models whose template doesn't grade effort collapse low/medium/high to a single 'On'."
         },
         "ollamaCode.permissionMode": {
           "type": "string",
@@ -240,9 +240,9 @@
           ],
           "default": "default",
           "enumDescriptions": [
-            "Auto: safe actions run on their own; risky ones (files outside the workspace, .env reads) ask first \u2014 OpenCode's default posture.",
+            "Auto: safe actions run on their own; risky ones (files outside the workspace, .env reads) ask first — OpenCode's default posture.",
             "Manual: every tool call asks for approval first.",
-            "Bypass: nothing asks \u2014 every tool call is auto-approved, including shell commands and file edits. Use only in workspaces you trust."
+            "Bypass: nothing asks — every tool call is auto-approved, including shell commands and file edits. Use only in workspaces you trust."
           ],
           "description": "How the agent asks for tool-call approval. Also switchable from the permissions picker in the chat composer. A change restarts the local OpenCode server on its next request, which interrupts any response still streaming."
         }
