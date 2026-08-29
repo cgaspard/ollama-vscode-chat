@@ -2,7 +2,7 @@
   "name": "ollama-code",
   "displayName": "Ollama Code",
   "description": "Agentic coding panel for your local Ollama models. A Claude Code / Codex–style chat experience powered by the open-source OpenCode agent, running entirely against your local models.",
-  "version": "0.26.2",
+  "version": "0.26.3",
   "publisher": "cgaspard",
   "license": "MIT",
   "icon": "media/icon.png",
