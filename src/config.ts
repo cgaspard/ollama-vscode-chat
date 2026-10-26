@@ -16,8 +16,6 @@ export { normalizeOllamaUrl, ollamaRestRoot };
 
 export interface ExtensionConfig {
   ollamaBaseUrl: string; // Ollama host root, e.g. http://127.0.0.1:11434 (no /v1)
-  opencodePath: string;
-  serverPort: number;
   defaultModel: string;
   /** Starting reasoning effort for models with no per-model choice stored. */
   defaultThinkingEffort: EffortLevel;
@@ -40,8 +38,6 @@ export function getConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration('ollamaCode');
   return {
     ollamaBaseUrl: normalizeOllamaUrl(cfg.get<string>('ollamaBaseUrl') ?? 'http://127.0.0.1:11434'),
-    opencodePath: (cfg.get<string>('opencodePath') ?? '').trim(),
-    serverPort: cfg.get<number>('serverPort') ?? 0,
     defaultModel: (cfg.get<string>('defaultModel') ?? '').trim(),
     agent: (cfg.get<string>('agent') ?? 'build').trim() || 'build',
     defaultThinkingEffort: normalizeEffort(cfg.get<string>('defaultThinkingEffort')),

@@ -2,7 +2,7 @@
 
 An agentic coding panel for **your local [Ollama](https://ollama.com) models** — a Claude Code / Codex–style chat experience that runs entirely on your machine.
 
-Under the hood it drives the open-source [**OpenCode**](https://opencode.ai) agent (Apache/MIT) as a headless server pointed at your Ollama server. You get a real agent — file edits, shell tools, permissions, multi-step reasoning — with no cloud model and no API key.
+Under the hood it runs the open-source [**OpenCode**](https://opencode.ai) agent (MIT) — OpenCode 2, embedded in the extension itself — pointed at your Ollama server. You get a real agent — file edits, shell tools, permissions, multi-step reasoning — with no cloud model and no API key.
 
 ## Demo
 
@@ -10,12 +10,13 @@ Under the hood it drives the open-source [**OpenCode**](https://opencode.ai) age
 
 ## Why
 
-The official Claude Code and Codex VS Code extensions are **not open source**, so they can't be adapted to local models. The *CLIs* behind several agents are open, though — and OpenCode in particular ships a headless server with a built-in Ollama provider. This extension wraps that server in a native chat panel and fills its model picker with the models you actually have installed.
+The official Claude Code and Codex VS Code extensions are **not open source**, so they can't be adapted to local models. The agents behind several of them are open, though — and OpenCode in particular can be embedded as a library. This extension runs it inside VS Code behind a native chat panel and fills its model picker with the models you actually have installed.
 
 ## Features
 
 - **Chat panel** in the Activity Bar / secondary side bar (and "Open in Editor Tab" for parallel conversations)
 - **Streaming** responses with a Claude-style timeline — thinking, tool steps, answer
+- **Steer or queue while it works** — press **Enter** to steer the running agent (it reads your message at its next step) or **⌥/Alt+Enter** to queue it for after the turn. Waiting messages sit above the composer, where you can switch one between *Steering* and *Queued*, or cancel it before the agent sees it
 - **Reasoning** blocks for thinking-capable models — folded away with how long the model thought once a turn ends; *Show reasoning* in the behavior menu hides them entirely
 - **Agent tools** — file reads/edits, shell, search — surfaced as a quiet timeline: one row per call, timestamped, expandable only when there's a payload (edits open a diff)
 - **MCP servers** — extend the agent with [Model Context Protocol](https://modelcontextprotocol.io) tools; servers you already configured for **Claude Code** (`.mcp.json`) or **VS Code** (`.vscode/mcp.json`) are picked up automatically. Type `/mcp` to see their live status
@@ -24,14 +25,14 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **Multi-server** — register, switch, edit, and remove Ollama servers; offline mode with a connection banner
 - **Context meter** with compaction indicator, a **Thinking** slider in the behavior menu, and a **+** menu carrying **image attachments** for vision models plus the **open file** as excludable context
 - **Session history** — persistent, resumable, auto-named; delete one or clear all
-- **Auto-context** — loads the selected model with an adequate `num_ctx` so OpenCode's large system prompt doesn't overflow Ollama's small default window
+- **Auto-context** — loads the selected model with an adequate `num_ctx` so OpenCode's large system prompt doesn't overflow Ollama's small default window, and sends that same `num_ctx` with every request so Ollama never silently reloads the model at its own default
 
 ## Requirements
 
 - **VS Code** 1.104+
 - **[Ollama](https://ollama.com)** installed and running (default `http://127.0.0.1:11434`) with at least one model pulled — e.g. `ollama pull llama3.2` (use a tool-capable model for the agent)
 
-> **[OpenCode](https://opencode.ai) is bundled** — the matching platform binary ships inside the extension, so there's nothing extra to install and it works offline. Power users can point at their own build with `ollamaCode.opencodePath`. An OpenCode install elsewhere on your machine is never picked up automatically — the panel always runs the version it was tested with (OpenCode 2 is not supported yet).
+> **[OpenCode](https://opencode.ai) is built in** — OpenCode 2 runs inside the extension (through `@opencode/sdk`), so there's nothing extra to install, no server process or port, and it works offline. It is isolated from any OpenCode you installed yourself: its own data folder, and your `~/.config/opencode` (providers, MCP servers) is never read. Chat history from earlier versions of this extension carries over. What it does share, deliberately: your workspace's `.opencode/` agents, commands and skills, and Claude Code skills (`.claude/skills`, project and global).
 
 ## Quick start
 
@@ -53,8 +54,6 @@ any time with **Switch to Release Version**.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `ollamaCode.ollamaBaseUrl` | `http://127.0.0.1:11434` | Ollama server host (root, no `/v1`) |
-| `ollamaCode.opencodePath` | _(bundled)_ | Override path to an `opencode` 1.x binary; empty uses the bundled one |
-| `ollamaCode.serverPort` | `0` | Embedded server port (0 = auto) |
 | `ollamaCode.defaultModel` | _(first)_ | Default model id (e.g. `llama3.2:3b`) |
 | `ollamaCode.agent` | `build` | `build` (can edit) or `plan` (read-only) |
 | `ollamaCode.autoEnsureContext` | `true` | Load the model with an adequate `num_ctx` before prompting |
@@ -154,34 +153,56 @@ VS Code webview (chat UI)
         │  postMessage
         ▼
 Extension host (bridge)
-        │  HTTP + SSE  (raw fetch)
+        │  in-process calls + event stream
         ▼
-opencode serve  ──native ollama provider──▶  Ollama (/api/chat, local model)
-   (OLLAMA_HOST + OPENCODE_CONFIG_CONTENT injected at launch)
+OpenCode 2 engine (@opencode/sdk, embedded)
+        │  bundled Ollama provider (opencode-provider/ollama.mjs)
+        ▼
+Ollama native API (/api/chat with num_ctx + think, local model)
 ```
 
 The extension enumerates your installed models with Ollama's REST API
-(`/api/tags`, `/api/show`, `/api/ps`), then augments OpenCode's built-in
-`ollama` provider with those models (capabilities, context limit, `num_ctx`)
-via the `OPENCODE_CONFIG_CONTENT` environment variable — **nothing is written
-to your workspace or global config.** The active server is passed through
-`OLLAMA_HOST`. Model load/eject uses `/api/generate` with `keep_alive` and
-`options.num_ctx`.
+(`/api/tags`, `/api/show`, `/api/ps`) and hands the engine its config in
+memory — **nothing is written to your workspace or global config.** Each model
+is declared with its capabilities, its context limit and the matching
+`num_ctx`, through a patched [ollama-ai-provider](vendor/ollama-ai-provider-cgaspard)
+that speaks Ollama's native `/api` endpoint. OpenCode's own built-in Ollama
+support uses the OpenAI-compatible `/v1` endpoint, which cannot carry a
+context window (Ollama reloads the model at its default on every `/v1`
+request), so it is never enabled. When you pick a different context window or
+pull a new model, the engine is rebuilt before the next message so the window
+you chose is the one Ollama runs. Model load/eject uses `/api/generate` with
+`keep_alive` and `options.num_ctx`.
 
 ## Develop from source
 
 ```bash
 npm install
-npm run bundle:opencode      # fetch the pinned OpenCode binary into bin/ for your platform
+npm run bundle:opencode-sdk  # build the embedded engine into opencode-sdk/ for your platform
+npm run bundle:provider      # bundle the Ollama provider into opencode-provider/ollama.mjs
 npm run compile              # type-check + bundle (extension + webview)
 # then press F5 in VS Code to launch the Extension Development Host
-npm run package:vsix:bundled # build a platform .vsix with the binary embedded
+npm run package:vsix:bundled # build a platform .vsix with the engine and provider embedded
 ```
 
-The OpenCode binary is fetched at build time (pinned by `opencodeVersion` in
-`package.json`) and is never committed — `bin/` is git-ignored. Bump that field
-to upgrade the bundled OpenCode. F5 also resolves the binary from `bin/`, so run
-`bundle:opencode` once before launching the dev host.
+The engine is built from `@opencode/sdk`, pinned to an exact version in
+`devDependencies`: one ES module plus the native modules it needs for the
+target platform. Neither it nor the provider bundle is committed. Run both
+`bundle:` scripts once before launching the dev host.
+
+Tests:
+
+```bash
+npm test                  # unit tests
+npm run test:integration  # the live webview in a headless VS Code, against a fake Ollama
+npm run test:live         # the engine and the provider against a real Ollama
+npm run test:e2e          # every feature through the real panel, against a real Ollama
+```
+
+`test:live -- provider` is the proof that the bundled provider works under
+OpenCode 2: prompts stream, tools run, the configured `num_ctx` is what
+Ollama loads the model at (`/api/ps`), thinking switches on and off, and
+images reach a vision model.
 
 ## License
 

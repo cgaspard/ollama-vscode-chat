@@ -93,15 +93,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
         e.affectsConfiguration('ollamaCode.ollamaBaseUrl') ||
-        e.affectsConfiguration('ollamaCode.opencodePath') ||
-        e.affectsConfiguration('ollamaCode.serverPort') ||
-        // MCP servers are baked into the injected config at spawn time, so a
-        // change to ours — or VS Code's shared `mcp` setting — needs a respawn
+        // MCP servers are baked into the engine's config when it starts, so a
+        // change to ours — or VS Code's shared `mcp` setting — needs a restart
         // to take effect. (On-disk .mcp.json / .vscode/mcp.json edits are picked
         // up by the "Restart OpenCode Server" command.)
         e.affectsConfiguration('ollamaCode.mcpServers') ||
         e.affectsConfiguration('mcp') ||
-        // The permission ruleset is baked into the injected config at spawn.
+        // The permission ruleset is baked into the engine's config at start.
+        // (Context windows and the model list are checked per send instead:
+        // see ChatBridge.ensureModelDeclared.)
         e.affectsConfiguration('ollamaCode.permissionMode')
       ) {
         log('relevant configuration changed; restarting server on next use');
