@@ -31,7 +31,7 @@ The official Claude Code and Codex VS Code extensions are **not open source**, s
 - **VS Code** 1.104+
 - **[Ollama](https://ollama.com)** installed and running (default `http://127.0.0.1:11434`) with at least one model pulled — e.g. `ollama pull llama3.2` (use a tool-capable model for the agent)
 
-> **[OpenCode](https://opencode.ai) is bundled** — the matching platform binary ships inside the extension, so there's nothing extra to install and it works offline. Power users can point at their own build with `ollamaCode.opencodePath`; an install on your `PATH` or in `~/.opencode/bin` is preferred over the bundled copy if present.
+> **[OpenCode](https://opencode.ai) is bundled** — the matching platform binary ships inside the extension, so there's nothing extra to install and it works offline. Power users can point at their own build with `ollamaCode.opencodePath`. An OpenCode install elsewhere on your machine is never picked up automatically — the panel always runs the version it was tested with (OpenCode 2 is not supported yet).
 
 ## Quick start
 
@@ -53,7 +53,7 @@ any time with **Switch to Release Version**.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `ollamaCode.ollamaBaseUrl` | `http://127.0.0.1:11434` | Ollama server host (root, no `/v1`) |
-| `ollamaCode.opencodePath` | _(bundled)_ | Override path to an `opencode` binary; empty uses your own install (PATH / `~/.opencode`) or the bundled one |
+| `ollamaCode.opencodePath` | _(bundled)_ | Override path to an `opencode` 1.x binary; empty uses the bundled one |
 | `ollamaCode.serverPort` | `0` | Embedded server port (0 = auto) |
 | `ollamaCode.defaultModel` | _(first)_ | Default model id (e.g. `llama3.2:3b`) |
 | `ollamaCode.agent` | `build` | `build` (can edit) or `plan` (read-only) |
