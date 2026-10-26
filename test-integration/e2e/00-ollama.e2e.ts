@@ -126,6 +126,14 @@ describe('e2e · Ollama', function () {
 
   it('a model Ollama gained after the engine started works without a restart', async () => {
     // A new tag of an installed model: instant, no download, removed after.
+    // It shares the model's weights, and Ollama names a runner after whichever
+    // tag loaded it — a runner the alias started would stay listed under the
+    // deleted alias, and the panel would show the model as not loaded. So the
+    // model is loaded under its own name first, at the window the alias will
+    // ask for, and the alias reuses that runner.
+    await freshChat({ model: MODEL });
+    await setEffort('off');
+    assert.match(await ask('Reply with exactly: WARM'), /WARM/);
     const alias = `e2e-alias-${process.pid}:latest`;
     const api = (path: string, method: string, body: unknown) =>
       fetch(`${OLLAMA}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -146,6 +154,7 @@ describe('e2e · Ollama', function () {
     } finally {
       await api('/api/delete', 'DELETE', { model: alias });
     }
+    assert.ok(await ps(MODEL), `${MODEL} is still listed under its own name (GET /api/ps)`);
   });
 
   it('a server added in the menu can be switched to, edited, and removed', async () => {
