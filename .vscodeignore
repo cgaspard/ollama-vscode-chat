@@ -48,3 +48,5 @@ opencode.json
 graphoxide-out/**
 test-live/**
 out-live/**
+# A working tree that once fetched the 1.x OpenCode binary must not package it.
+bin/**
