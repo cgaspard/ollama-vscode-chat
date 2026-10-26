@@ -35,7 +35,7 @@ import { ServerRegistry } from '../connection';
 import { OllamaClient, OllamaModel } from '../ollama/client';
 import { log, logError } from '../logger';
 import { discoverMcpServers } from '../mcp/discovery';
-import { OpencodeClient } from '../opencode/client';
+import { OpencodeV2Client } from '../opencode/v2client';
 import { OpencodeAgent, OpencodeEvent, PromptBody } from '../opencode/protocol';
 import { Disposable, OpencodeServerManager } from '../opencode/serverManager';
 import { Prefs } from '../prefs';
@@ -44,6 +44,7 @@ import {
   UiAgent,
   UiCommand,
   UiGoal,
+  UiDelivery,
   UiImage,
   UiMcpServer,
   UiModel,
@@ -102,7 +103,7 @@ const KEEP_WARM_EVERY_MS = 120_000;
  * Owns the conversation state for that webview and relays the SSE event stream.
  */
 export class ChatBridge {
-  private client: OpencodeClient | undefined;
+  private client: OpencodeV2Client | undefined;
   private currentSessionID: string | null = null;
   private currentModel: string | null = null;
   private agent: string;
@@ -113,7 +114,7 @@ export class ChatBridge {
   private eventAbort: AbortController | undefined;
   /** The client the live event stream is bound to, so a respawned server (new
    * port) can be detected and re-subscribed. */
-  private streamingClient: OpencodeClient | undefined;
+  private streamingClient: OpencodeV2Client | undefined;
   private disposed = false;
   private connected = false;
   private connecting = false;
@@ -527,6 +528,15 @@ export class ChatBridge {
       return;
     }
     try {
+      // The engine is recreated when a setting it was built from changes
+      // (permission mode, MCP servers, a context-window change) or on "Restart
+      // OpenCode Server". The health loop would notice within a tick, but the
+      // message in hand would already have failed against the stopped engine —
+      // so heal first.
+      if (msg.type !== 'ready' && this.client && !this.deps.server.isRunning) {
+        log('engine was restarted since this panel connected; reconnecting before handling the message');
+        await this.reconnect();
+      }
       switch (msg.type) {
         case 'ready':
           // A fresh webview always starts with the picker closed — stop any
@@ -546,7 +556,18 @@ export class ChatBridge {
             msg.images ?? [],
             msg.includeActiveFile ?? false,
             msg.includeSelection ?? false,
+            msg.delivery ?? 'steer',
           );
+          break;
+        case 'inboxSetDelivery':
+          if (this.currentSessionID) {
+            await this.client?.setDelivery(this.currentSessionID, msg.inboxID, msg.delivery);
+          }
+          break;
+        case 'inboxCancel':
+          if (this.currentSessionID) {
+            await this.client?.cancelPending(this.currentSessionID, msg.inboxID);
+          }
           break;
         case 'selectModel':
           this.currentModel = msg.modelID;
@@ -1125,6 +1146,32 @@ export class ChatBridge {
   }
 
   /**
+   * The engine's models and their context windows are baked in when it
+   * starts. A model pulled since is unknown to it (the prompt would fail), and
+   * a window chosen since — a context pick applied by a plain Load, a changed
+   * minContextLength — would not be the num_ctx that reaches Ollama, which
+   * would then reload the model at the stale window. Rebuild the engine first;
+   * the session is kept.
+   */
+  private async ensureModelDeclared(modelID: string): Promise<void> {
+    // Only for a model Ollama actually has: a rebuild cannot help one it does
+    // not, and the send then fails with Ollama's own "not found".
+    const model = await this.deps.ollama.getModel(modelID).catch(() => undefined);
+    if (!model) {
+      return;
+    }
+    const numCtx = this.ctxFor(modelID, model.maxContextLength);
+    if (this.deps.server.declares(modelID, numCtx)) {
+      return;
+    }
+    log(`${modelID} at ${numCtx} is not what the running engine declares; rebuilding it`);
+    await this.rebuildServer(`Adding ${modelID} to OpenCode…`);
+    if (!this.client) {
+      throw new Error('OpenCode server is not running.');
+    }
+  }
+
+  /**
    * Run a server command or skill (e.g. the user typed "/fibonacci-helper x").
    * Creates the session lazily if needed (a command is real activity, so it
    * earns a history entry), ensures the model context, then hands off to
@@ -1137,6 +1184,7 @@ export class ChatBridge {
     if (!this.currentModel) {
       throw new Error('No Ollama model selected.');
     }
+    await this.ensureModelDeclared(this.currentModel);
     await this.ensureSession();
     const cfg = getConfig();
     if (cfg.autoEnsureContext) {
@@ -2149,6 +2197,7 @@ export class ChatBridge {
       const title = match.title || 'Chat';
       this.updateTitle(title);
       this.post({ type: 'sessionLoaded', sessionID: stored, title, messages });
+      this.postInbox();
     } catch (err) {
       // Restore is best-effort — fall back to the normal fresh-chat path.
       logError('restore last session', err);
@@ -2170,6 +2219,7 @@ export class ChatBridge {
     const title = sessions.find((s) => s.id === sessionID)?.title ?? 'Chat';
     this.updateTitle(title);
     this.post({ type: 'sessionLoaded', sessionID, title, messages });
+    this.postInbox();
   }
 
   private async handleSend(
@@ -2178,6 +2228,7 @@ export class ChatBridge {
     images: UiImage[],
     includeActiveFile: boolean,
     includeSelection: boolean,
+    delivery: UiDelivery = 'steer',
   ): Promise<void> {
     if (!this.client) {
       throw new Error('OpenCode server is not running.');
@@ -2185,6 +2236,7 @@ export class ChatBridge {
     if (!this.currentModel) {
       throw new Error('No Ollama model selected.');
     }
+    await this.ensureModelDeclared(this.currentModel);
     // Last word on what's actually open, so a file closed since the last editor
     // event can never ride along on the prompt.
     this.pruneClosedContext();
@@ -2279,12 +2331,15 @@ export class ChatBridge {
     }
 
     this.post({ type: 'busy', busy: true });
-    const body: PromptBody = {
+    const body: PromptBody & { delivery: UiDelivery } = {
       model: { providerID: 'ollama', modelID: this.currentModel },
       agent: this.agent,
       ...(system ? { system } : {}),
       ...(variant ? { variant } : {}),
       parts,
+      // Only matters while the agent is working: steer at its next step, or
+      // queue for after the turn.
+      delivery,
     };
     try {
       await this.client.promptAsync(this.currentSessionID!, body);
@@ -2345,6 +2400,16 @@ export class ChatBridge {
       void this.onTurnIdle();
     }
     this.post({ type: 'event', event });
+  }
+
+  /** Send the current session's pending (not yet delivered) messages to the webview. */
+  private postInbox(): void {
+    const sid = this.currentSessionID;
+    const items = sid && this.client ? this.client.pendingInbox(sid) : [];
+    this.post({
+      type: 'inbox',
+      items: items.map(({ inboxID, text, delivery, files }) => ({ inboxID, text, delivery, files })),
+    });
   }
 
   private async openFile(p: string): Promise<void> {

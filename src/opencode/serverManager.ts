@@ -1,530 +1,230 @@
-import { ChildProcess, execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
-import { isSupportedOpencodeVersion, resolveBinaryPath } from '../core/binary';
-import { clampContext } from '../core/context';
-import { variantsForModel } from '../core/effort';
-import { HOST_XDG_ENV, hostXdgForChildren, snapshotHostXdg, withHostXdg } from '../core/hostenv';
-import { augmentedPath } from '../core/mcp';
+import { augmentedPath, withLocalEnvironment } from '../core/mcp';
 import { opencodePermission } from '../core/permission';
+import { toEngineProviderID } from '../core/providerIds';
 import { OllamaClient } from '../ollama/client';
 import { log, logError } from '../logger';
 import { discoverMcpServers } from '../mcp/discovery';
 import { Prefs } from '../prefs';
-import { OpencodeClient } from './client';
+import { createHost, type SdkHost } from './embedded';
+import { OLLAMA_PROVIDER_ID, ollamaProviderConfig, providerModuleUrl, type ProviderModel } from './ollamaProvider';
 import { BUILD_PROMPT, PLAN_PROMPT } from './prompts';
-
-/**
- * The Ollama provider we ship and pre-seed: a patched fork of
- * ollama-ai-provider-v2 (provenance and upstream PR in
- * vendor/<pkg>/package.json). Three fixes matter here — image parts no longer
- * throw on untagged file data, a graded thinking effort reaches Ollama
- * instead of being flattened to a boolean, and the stream processor no longer
- * opens the text part on the empty `content: ""` that rides along with every
- * thinking-phase chunk (which put the reasoning block BELOW the answer in the
- * chat, since parts render in creation order).
- */
-const BUNDLED_PROVIDER = 'ollama-ai-provider-cgaspard';
+import { OpencodeV2Client } from './v2client';
 
 export interface ServerStartResult {
+  /** Where the engine runs, for logs only: there is no network address. */
   baseUrl: string;
-  client: OpencodeClient;
+  client: OpencodeV2Client;
 }
 
 export interface Disposable {
   dispose(): void;
 }
 
+/** Shown in logs where a server URL used to be. */
+const EMBEDDED_URL = 'embedded://opencode';
+
 /**
- * Owns the lifecycle of a headless `opencode serve` process, configured to talk
- * to the local Ollama server. Config is injected via OPENCODE_CONFIG_CONTENT
- * so nothing is written to the user's workspace or global config.
+ * Owns the embedded OpenCode engine (OpenCode 2, running in-process through
+ * @opencode/sdk), configured to talk to the active Ollama server through the
+ * bundled provider. Config is handed to the engine in memory, so nothing is
+ * written to the user's workspace or global config.
+ *
+ * Still named a "server" manager: the bridge's lifecycle (start, dispose,
+ * restart) is unchanged, only what it starts is.
  */
 export class OpencodeServerManager {
-  private proc: ChildProcess | undefined;
-  private baseUrl: string | undefined;
-  private client: OpencodeClient | undefined;
+  private host: SdkHost | undefined;
+  private client: OpencodeV2Client | undefined;
   private starting: Promise<ServerStartResult> | undefined;
+  /**
+   * The previous engine's shutdown. A new host must not open the same database
+   * and folders while the old one is still closing (two engines in one
+   * process over one SQLite file), so a start waits for this first.
+   */
+  private closing: Promise<void> = Promise.resolve();
+  /** Model id → the context window (num_ctx) the running engine's config declares for it. */
+  private declared = new Map<string, number>();
+  /** Bumped by dispose(), so a start that was in flight when it ran can tell it is stale. */
+  private generation = 0;
   private readonly exitListeners = new Set<() => void>();
-  /** Procs we killed on purpose, so their `exit` doesn't trigger reconnects. */
-  private readonly killed = new WeakSet<ChildProcess>();
 
   constructor(
     private readonly cfg: ExtensionConfig,
     private readonly ollama: OllamaClient,
     private readonly prefs: Prefs,
-    /** Extension install dir — holds the bundled `bin/opencode[.exe]`. */
+    /** Extension install dir — holds the engine (`opencode-sdk/`) and provider (`opencode-provider/`). */
     private readonly extensionPath: string,
-    /** Private data dir for our managed server, isolated from the user's. */
+    /** Private data dir for the engine, isolated from the user's own OpenCode. */
     private readonly dataDir: string,
   ) {}
 
   get isRunning(): boolean {
-    return !!this.proc && !this.proc.killed;
+    return !!this.client;
   }
 
   /**
-   * Register a callback fired whenever the server process exits unexpectedly.
+   * Whether the running engine's config declares `modelID` — at context window
+   * `numCtx`, when given. Both are baked in when the engine starts: a model
+   * pulled since is unknown to it, and a context chosen since (a per-model
+   * pick, a minContextLength change) would not be what reaches Ollama, which
+   * would then reload the model at the old window. The bridge rebuilds the
+   * engine before sending in either case.
+   */
+  declares(modelID: string, numCtx?: number): boolean {
+    const declared = this.declared.get(modelID);
+    return declared !== undefined && (numCtx === undefined || declared === numCtx);
+  }
+
+  /**
+   * Register a callback fired whenever the engine stops unexpectedly.
    * Multiple bridges (sidebar + secondary + editor tabs) share one manager, so
-   * each registers its own listener and disposes it on teardown.
+   * each registers its own listener and disposes it on teardown. An in-process
+   * engine has no process to die, so this only fires if a future engine
+   * reports a fatal stop; settings changes and restarts are intentional.
    */
   addExitListener(cb: () => void): Disposable {
     this.exitListeners.add(cb);
     return { dispose: () => this.exitListeners.delete(cb) };
   }
 
-  /** Start (or return the in-flight start of) the server. Idempotent. */
+  /** Start (or return the in-flight start of) the engine. Idempotent. */
   async start(): Promise<ServerStartResult> {
-    if (this.client && this.baseUrl) {
-      return { baseUrl: this.baseUrl, client: this.client };
+    if (this.client) {
+      return { baseUrl: EMBEDDED_URL, client: this.client };
     }
     if (this.starting) {
       return this.starting;
     }
-    this.starting = this.doStart().finally(() => {
-      this.starting = undefined;
+    const starting = this.doStart().finally(() => {
+      if (this.starting === starting) {
+        this.starting = undefined;
+      }
     });
-    return this.starting;
+    this.starting = starting;
+    return starting;
   }
 
   private async doStart(): Promise<ServerStartResult> {
-    const bin = await this.resolveBinary();
-    if (!bin) {
-      // The extension bundles a platform binary, so this is effectively
-      // unreachable in shipped builds; it only fires for a corrupt install or
-      // a bad `opencodePath` override.
-      throw new Error(
-        'opencode binary not found. The bundled binary may be missing or unreadable; reinstall the extension, or set "ollamaCode.opencodePath" to a valid opencode binary.',
-      );
-    }
-    await this.prepareBundledBinary(bin);
-    this.seedBundledProvider();
-
-    const configContent = await this.buildConfigContent();
+    const generation = this.generation;
+    await this.closing;
+    const { content, models } = await this.buildConfigContent();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
-    const env = this.buildEnv(configContent);
+    const version = this.engineVersion();
+    log(`starting embedded opencode ${version} (cwd=${cwd}, ollama=${this.ollama.getBaseUrl()})`);
+    const host = await createHost(this.extensionPath, { root: this.dataDir }, content);
+    if (generation !== this.generation) {
+      // Disposed while starting (a settings change, a restart): this engine is
+      // already stale. Close it rather than hand it out.
+      void host.close().catch((err: unknown) => logError('closing a superseded engine', err));
+      throw new Error('OpenCode engine stopped');
+    }
+    this.host = host;
+    this.client = new OpencodeV2Client(host, cwd, version);
+    this.declared = new Map(models);
+    log('embedded opencode ready');
+    return { baseUrl: EMBEDDED_URL, client: this.client };
+  }
 
-    log(`starting opencode server: ${bin} serve --port ${this.cfg.serverPort} (cwd=${cwd})`);
-
-    const proc = spawn(
-      bin,
-      ['serve', '--port', String(this.cfg.serverPort), '--hostname', '127.0.0.1'],
-      { cwd, env },
-    );
-    this.proc = proc;
-
-    let baseUrl: string;
-    let client: OpencodeClient;
+  /** The bundled engine's version, from the stamp the build writes. */
+  private engineVersion(): string {
     try {
-      baseUrl = await this.awaitListening(proc);
-      log(`opencode server listening at ${baseUrl}`);
-      client = new OpencodeClient(baseUrl);
-      // Confirm health before declaring ready.
-      await this.waitHealthy(client);
-    } catch (err) {
-      // A server that is listening but never healthy keeps running, and every
-      // retry spawns another — kill this one before the caller tries again.
-      this.killed.add(proc);
-      proc.kill();
-      if (this.proc === proc) {
-        this.proc = undefined;
-      }
-      throw err;
+      return fs.readFileSync(path.join(this.extensionPath, 'opencode-sdk', 'version'), 'utf8').split('\n')[0].trim();
+    } catch {
+      return 'unknown';
     }
-    this.baseUrl = baseUrl;
-    this.client = client;
-
-    proc.on('exit', (code, signal) => {
-      const intentional = this.killed.has(proc);
-      log(`opencode server exited (code=${code}, signal=${signal}${intentional ? ', intentional' : ''})`);
-      this.killed.delete(proc);
-      if (this.proc === proc) {
-        this.proc = undefined;
-        this.baseUrl = undefined;
-        this.client = undefined;
-      }
-      // Only notify on an *unexpected* exit so bridges can self-heal; a dispose
-      // / restart we triggered ourselves must not kick a reconnect storm.
-      if (!intentional) {
-        for (const cb of [...this.exitListeners]) {
-          try {
-            cb();
-          } catch (err) {
-            logError('exit listener threw', err);
-          }
-        }
-      }
-    });
-
-    return { baseUrl, client };
   }
 
-  /** Resolve a URL from the server's stdout/stderr "listening on ..." line. */
-  private awaitListening(proc: ChildProcess): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      let settled = false;
-      const urlRe = /listening on\s+(https?:\/\/[^\s]+)/i;
-
-      const onData = (chunk: Buffer) => {
-        const text = chunk.toString();
-        log(`[opencode] ${text.trimEnd()}`);
-        const m = text.match(urlRe);
-        if (m && !settled) {
-          settled = true;
-          cleanup();
-          resolve(m[1].replace(/\/+$/, ''));
-        }
-      };
-      const onErr = (err: Error) => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          reject(err);
-        }
-      };
-      const onExit = (code: number | null) => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          reject(new Error(`opencode server exited before listening (code=${code})`));
-        }
-      };
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          cleanup();
-          reject(new Error('timed out waiting for opencode server to start (30s)'));
-        }
-      }, 30000);
-
-      const cleanup = () => {
-        clearTimeout(timer);
-        proc.stdout?.off('data', onData);
-        proc.stderr?.off('data', onData);
-        proc.off('error', onErr);
-        proc.off('exit', onExit);
-      };
-
-      proc.stdout?.on('data', onData);
-      proc.stderr?.on('data', onData);
-      proc.on('error', onErr);
-      proc.on('exit', onExit);
-    });
-  }
-
-  private async waitHealthy(client: OpencodeClient): Promise<void> {
-    for (let i = 0; i < 20; i++) {
-      try {
-        const h = await client.health();
-        if (h.healthy) {
-          return;
-        }
-      } catch {
-        // not up yet
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    throw new Error('opencode server did not become healthy');
-  }
-
-  /**
-   * Environment for the managed server. Pins OpenCode's data/state/config/cache
-   * dirs under our private `dataDir` (via the XDG vars OpenCode honors on all
-   * platforms) so this instance can never share session/auth/state with a
-   * user's own OpenCode install — regardless of version. Config itself is still
-   * injected in-memory via OPENCODE_CONFIG_CONTENT; XDG_CONFIG_HOME just keeps
-   * any file OpenCode writes out of the user's real config dir.
-   */
-  private buildEnv(configContent: string): NodeJS.ProcessEnv {
-    const sub = (name: string) => path.join(this.dataDir, name);
-    // Best-effort: create the root so OpenCode doesn't fail on a missing dir.
-    try {
-      fs.mkdirSync(this.dataDir, { recursive: true });
-    } catch (err) {
-      logError('could not create opencode data dir', err);
-    }
-    // Snapshot the host's XDG values before ours replace them, so the bundled
-    // plugin can hand them back to the commands the agent runs.
-    const hostXdg = JSON.stringify(snapshotHostXdg(process.env));
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      OPENCODE_CONFIG_CONTENT: configContent,
-      // Point OpenCode's native ollama provider at the active server.
-      OLLAMA_HOST: this.ollama.getBaseUrl(),
-      NO_COLOR: '1',
-      // Augment PATH so stdio MCP servers (command: ["npx"/"uvx"/...]) can be
-      // spawned even when the extension host was launched from a GUI context
-      // with a minimal PATH (the #1 reason npx-based MCP servers fail to start).
-      // Existing entries are kept first so a user's own toolchain still wins.
-      PATH: augmentedPath(process.env.PATH, os.homedir(), path.delimiter),
-      [HOST_XDG_ENV]: hostXdg,
-      // Sandbox all on-disk state to our managed dir.
-      //
-      // These are inherited by every process the agent's `bash` tool spawns,
-      // where they break XDG-respecting CLIs (`gh auth status` reports "not
-      // logged in", `helm` loses its repo config). `opencode-plugin/
-      // xdg-passthrough.js` restores the snapshot above for those children;
-      // see src/core/hostenv.ts.
-      XDG_DATA_HOME: sub('data'),
-      XDG_CONFIG_HOME: sub('config'),
-      XDG_CACHE_HOME: sub('cache'),
-      XDG_STATE_HOME: sub('state'),
-    };
-    // A user-exported OPENCODE_SERVER_PASSWORD (for their own remote OpenCode)
-    // would make our managed server demand basic auth — and this extension is
-    // its only client and sends none, so every request would 401. The server
-    // is loopback-only with isolated state; it must never be password-gated.
-    delete env.OPENCODE_SERVER_PASSWORD;
-    return env;
-  }
-
-  /** Build the OPENCODE_CONFIG_CONTENT JSON injecting the Ollama provider. */
-  private async buildConfigContent(): Promise<string> {
-    // Read fresh so context-size changes apply on the next restart.
+  /** Build the engine config: the Ollama provider, MCP servers, permissions, agents. */
+  private async buildConfigContent(): Promise<{ content: string; models: Array<[string, number]> }> {
+    // Read fresh so context-size and permission changes apply on the next start.
     const cfg = getConfig();
-    const defaultCtx = cfg.minContextLength;
 
-    const models: Record<string, Record<string, unknown>> = {};
+    let models: ProviderModel[] = [];
     try {
-      const list = await this.ollama.listModels();
-      for (const m of list) {
-        // Per-model context window: the user's override, else the global
-        // minContextLength, clamped to the model's real maximum. This is now a
-        // single number with a single meaning — it is sent to Ollama as
-        // `num_ctx` AND declared as OpenCode's `limit.context`, so the window
-        // the runner holds and the budget OpenCode packs against cannot drift
-        // apart.
-        const target = this.prefs.ctxOverride(m.id) ?? defaultCtx;
-        const ctx = clampContext(target, m.maxContextLength);
-        // Sent to Ollama as /api/chat `options.num_ctx`. The nesting is load-
-        // bearing: ollama-ai-provider-v2 parses providerOptions.ollama as
-        // `{ think?, options? }`, so a flat `{ num_ctx }` is silently dropped
-        // (verified — the model came up at the server default instead).
-        models[m.id] = {
-          name: m.displayName,
-          attachment: !!m.vision,
-          reasoning: !!m.reasoning,
-          tool_call: m.toolUse ?? true,
-          modalities: {
-            input: m.vision ? ['text', 'image'] : ['text'],
-            output: ['text'],
-          },
-          // Output budget: generous enough for reasoning models that emit long
-          // <think> blocks before answering (8192 truncated them mid-thought),
-          // but still a fraction of the window so input isn't crowded out.
-          limit: { context: ctx, output: Math.min(32768, Math.floor(ctx / 4)) },
-          options: { options: { num_ctx: ctx } },
-          // Reasoning-effort levels, selectable per message via PromptBody.variant.
-          // Declared unconditionally for every model — declaring a variant a model
-          // can't use is harmless (only *sending* it errors), and unconditional
-          // declaration keeps effort changes from needing a server restart. The
-          // gate lives in core/effort.ts, which decides what may be sent.
-          variants: variantsForModel(),
-        };
-      }
+      models = await this.ollama.listModels();
     } catch (err) {
+      // Ollama down at start: the provider is still declared, and the bridge
+      // rebuilds the engine before sending to a model it does not declare.
       logError('could not enumerate Ollama models for config', err);
     }
 
-    // Use the NATIVE `ollama-ai-provider-v2` against Ollama's own /api endpoint,
-    // pinned to the active server (the provider defaults to localhost).
+    const npm = providerModuleUrl(this.extensionPath);
+    if (!npm) {
+      throw new Error(
+        'The bundled Ollama provider is missing (opencode-provider/ollama.mjs). Reinstall the extension.',
+      );
+    }
+
+    // The bundled provider against Ollama's native /api endpoint, with each
+    // model's context window as `num_ctx` (see ollamaProvider.ts for why not
+    // the built-in provider or /v1).
     //
-    // We were on the OpenAI-compatible /v1 endpoint, which cannot carry a
-    // context window: /v1 has no field for it, and Ollama re-loads the model at
-    // its own default on every request — measured, a model explicitly loaded at
-    // 4096 came back as 40960 after a single two-token /v1 chat. That silently
-    // undid the context the user picked. The native endpoint takes `num_ctx`
-    // per request, so the window we ask for is the window we get.
-    //
-    // The historical objection to this provider — an object-shaped
-    // `finishReason` that failed OpenCode's validation and looped the agent —
-    // no longer reproduces (provider 4.0.1 on OpenCode 1.17.18 and 1.18.4: no
-    // ZodError, tool calls complete, one turn per prompt).
-    //
-    // Costs, both accepted deliberately:
-    //   - Graded thinking is gone. The provider flattens every effort to a
-    //     boolean `think`, so gpt-oss's low/medium/high is not expressible.
-    //     See src/core/effort.ts.
+    // Accepted costs, unchanged from 1.x:
     //   - `keep_alive` is embedding-only in this provider, so chat requests
     //     still cannot carry it. It stays applied out-of-band by the bridge's
-    //     keep-warm poll via /api/generate, exactly as before.
+    //     keep-warm poll via /api/generate.
+    const provider = ollamaProviderConfig({
+      baseUrl: this.ollama.getBaseUrl(),
+      npm,
+      models,
+      defaultCtx: cfg.minContextLength,
+      ctxOverride: (id) => this.prefs.ctxOverride(id),
+    });
+
     // MCP servers discovered from .mcp.json / .vscode/mcp.json / VS Code user
     // settings / our own `ollamaCode.mcpServers`. Tokens like ${VAR} are already
-    // resolved to literals (OPENCODE_CONFIG_CONTENT is not substituted by
+    // resolved to literals (the injected config is not substituted by
     // OpenCode), so what we inject is ready to spawn as-is. Their tools flow
     // through OpenCode's existing tool-call + permission machinery for free.
     let mcp: ReturnType<typeof discoverMcpServers>['map'] = {};
     try {
-      // stdio servers are spawned by OpenCode and would otherwise inherit the
-      // pinned XDG dirs the same way shell commands do; the `shell.env` plugin
-      // does not reach them, so hand the values over per-server instead.
-      mcp = withHostXdg(
-        discoverMcpServers().map,
-        hostXdgForChildren(process.env, os.homedir(), path.join),
-      );
+      // stdio servers inherit the extension host's environment. When VS Code
+      // was launched from a GUI context its PATH can be minimal (the #1 reason
+      // npx/uvx-based servers fail to start), so add the usual install
+      // locations; existing entries stay first so the user's toolchain wins.
+      mcp = withLocalEnvironment(discoverMcpServers().map, {
+        PATH: augmentedPath(process.env.PATH, os.homedir(), path.delimiter),
+      });
     } catch (err) {
       logError('could not discover MCP servers', err);
     }
 
-    const pluginUrl = this.xdgPluginUrl();
     const config = {
       $schema: 'https://opencode.ai/config.json',
-      // Hands the host's real XDG_* values back to the agent's shell commands.
-      ...(pluginUrl ? { plugin: [pluginUrl] } : {}),
+      // Only our provider. OpenCode would otherwise also enable any provider it
+      // can find a key for in the environment (an exported OPENAI_API_KEY) and
+      // its own auto-discovering `ollama` plugin — and its internal
+      // title/summary agents could then run on a model the user never chose.
+      enabled_providers: [toEngineProviderID(OLLAMA_PROVIDER_ID)],
       // Tool-approval posture (default / strict / bypass), read fresh so a
       // mode change applies on restart. Every mode keeps the built-in
       // `question` tool at "allow": the picker is the interaction (the bridge
-      // relays `question.asked` and replies via the /question API), so an
+      // relays `question.asked` and replies through the form API), so an
       // approval gate in front of it would be redundant.
-      permission: opencodePermission(getConfig().permissionMode),
+      permission: opencodePermission(cfg.permissionMode),
+      // Override the build/plan agent prompts so the model identifies as
+      // "OpenCode Agent" instead of OpenCode's built-in "You are opencode…".
       agent: {
         build: { prompt: BUILD_PROMPT },
         plan: { prompt: PLAN_PROMPT },
       },
-      provider: {
-        ollama: {
-          npm: BUNDLED_PROVIDER,
-          name: 'Ollama',
-          options: { baseURL: `${this.ollama.getBaseUrl()}/api` },
-          ...(Object.keys(models).length ? { models } : {}),
-        },
-      },
+      // OpenCode 2 ships its todo tool behind a flag; the panel's live todo
+      // list renders from it.
+      experimental: { todo: true },
+      provider,
       ...(Object.keys(mcp).length ? { mcp } : {}),
     };
-    return JSON.stringify(config);
-  }
-
-  /**
-   * Copy the bundled provider into OpenCode's package cache so it never has to
-   * fetch one from npm.
-   *
-   * OpenCode resolves a config `npm:` provider by installing it under
-   * $XDG_CACHE_HOME/opencode/packages/<name>/ — and buildEnv pins
-   * XDG_CACHE_HOME into our private dataDir, so that path is entirely ours to
-   * populate. A ready-made tree there is enough: verified against an
-   * unpublished package name with no registry access at all.
-   *
-   * Best-effort and idempotent. Re-copies when the staged version differs (an
-   * extension update), no-ops otherwise, and a failure is not fatal — OpenCode
-   * would just fall back to npm, which is the old behaviour.
-   */
-  private seedBundledProvider(): void {
-    try {
-      const staged = path.join(
-        this.extensionPath,
-        'opencode-provider',
-        'packages',
-        BUNDLED_PROVIDER,
-      );
-      if (!fs.existsSync(staged)) {
-        logError('bundled provider missing from the extension; OpenCode will try npm', staged);
-        return;
-      }
-      const dest = path.join(this.dataDir, 'cache', 'opencode', 'packages', BUNDLED_PROVIDER);
-      const versionOf = (dir: string): string | undefined => {
-        try {
-          const manifest = path.join(dir, 'node_modules', BUNDLED_PROVIDER, 'package.json');
-          return JSON.parse(fs.readFileSync(manifest, 'utf8')).version as string;
-        } catch {
-          return undefined;
-        }
-      };
-      const want = versionOf(staged);
-      if (want && want === versionOf(dest)) {
-        return; // already seeded at this version
-      }
-      log(`seeding bundled provider ${BUNDLED_PROVIDER}@${want} into ${dest}`);
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.cpSync(staged, dest, { recursive: true });
-    } catch (err) {
-      logError('could not seed the bundled provider (falling back to npm)', err);
-    }
-  }
-
-  /**
-   * `file://` URL of the bundled `shell.env` plugin, or null when it is missing
-   * (corrupt install / a packaging change that dropped it). Returning null just
-   * means shell commands keep the pinned XDG values — the pre-fix behaviour —
-   * and a plugin that fails to load is likewise non-fatal: verified that a
-   * syntactically broken plugin still leaves the server serving requests.
-   */
-  private xdgPluginUrl(): string | null {
-    const p = path.join(this.extensionPath, 'opencode-plugin', 'xdg-passthrough.js');
-    if (!fs.existsSync(p)) {
-      logError('xdg passthrough plugin missing; agent shell commands keep pinned XDG dirs', p);
-      return null;
-    }
-    return pathToFileURL(p).href;
-  }
-
-  /** Absolute path to the binary bundled inside the VSIX (if present). */
-  private bundledBinary(): string | null {
-    const exe = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
-    const p = path.join(this.extensionPath, 'bin', exe);
-    return fs.existsSync(p) ? p : null;
-  }
-
-  /**
-   * On macOS, a binary delivered inside a Marketplace VSIX can carry the
-   * `com.apple.quarantine` attribute, which makes Gatekeeper kill it on exec
-   * ("cannot be opened because the developer cannot be verified"). Strip it,
-   * but only from our own bundled binary — never touch a user-provided one.
-   * Best-effort and idempotent: ignore failures (e.g. xattr missing, already
-   * clean, SIP edge cases) so this never blocks startup.
-   */
-  private async prepareBundledBinary(bin: string): Promise<void> {
-    if (process.platform !== 'darwin') {
-      return;
-    }
-    if (bin !== this.bundledBinary()) {
-      return; // user-provided binary: leave it untouched
-    }
-    await new Promise<void>((resolve) => {
-      const child = spawn('xattr', ['-d', 'com.apple.quarantine', bin]);
-      child.on('error', () => resolve()); // xattr absent / unexpected — ignore
-      child.on('close', () => resolve()); // non-zero just means "nothing to remove"
-    });
-  }
-
-  /**
-   * Find the opencode binary: the `ollamaCode.opencodePath` override if set
-   * and present, otherwise the binary bundled in the VSIX. A user's own install
-   * is never picked up implicitly — see `resolveBinaryPath`.
-   * Returns null only if both fail (corrupt install / bad override).
-   */
-  private async resolveBinary(): Promise<string | null> {
-    // Read fresh: the cfg snapshot is from activation, so a changed override
-    // would otherwise only apply after a window reload.
-    const overridePath = getConfig().opencodePath;
-    const bin = resolveBinaryPath({
-      overridePath,
-      bundled: this.bundledBinary(),
-      exists: (p) => fs.existsSync(p),
-    });
-    if (bin && bin === overridePath) {
-      const version = await this.binaryVersion(bin);
-      if (!isSupportedOpencodeVersion(version)) {
-        logError(
-          `opencodePath points at ${version}; only OpenCode 1.x is supported, so the server will not become healthy. Clear the setting to use the bundled binary.`,
-          bin,
-        );
-      }
-    }
-    return bin;
-  }
-
-  /** `<bin> --version` output, or '' if it can't be run (treated as supported). */
-  private binaryVersion(bin: string): Promise<string> {
-    return new Promise<string>((resolve) => {
-      execFile(bin, ['--version'], { timeout: 5000 }, (err, stdout) =>
-        resolve(err ? '' : stdout.trim()),
-      );
-    });
+    const declared = Object.entries(provider).flatMap(([, p]) =>
+      Object.entries(((p as { models?: Record<string, { limit: { context: number } }> }).models ?? {})).map(
+        ([id, m]) => [id, m.limit.context] as [string, number],
+      ),
+    );
+    return { content: JSON.stringify(config), models: declared };
   }
 
   async restart(): Promise<ServerStartResult> {
@@ -533,16 +233,25 @@ export class OpencodeServerManager {
   }
 
   dispose(): void {
-    if (this.proc && !this.proc.killed) {
-      log('stopping opencode server');
-      this.killed.add(this.proc); // mark intentional so exit doesn't trigger reconnect
-      this.proc.kill();
+    if (this.client) {
+      log('stopping embedded opencode');
     }
-    this.proc = undefined;
-    this.baseUrl = undefined;
+    this.client?.dispose();
+    const host = this.host;
+    this.host = undefined;
     this.client = undefined;
+    this.declared = new Map();
+    this.generation++;
     // Drop any in-flight start so a dispose mid-startup (e.g. restart()) can't
     // have its stale promise returned by the next start() — forces a fresh one.
     this.starting = undefined;
+    // Closing releases the engine's watchers, MCP children and database. The
+    // next start waits for it (see `closing`).
+    if (host) {
+      const previous = this.closing;
+      this.closing = previous
+        .then(() => host.close())
+        .catch((err: unknown) => logError('closing embedded opencode', err));
+    }
   }
 }

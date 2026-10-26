@@ -55,9 +55,34 @@ export async function setInput(value: string): Promise<void> {
   await exec({ __test__: 'setInput', value });
 }
 
-/** Dispatch a real click on the first match. Returns false if nothing matched. */
-export async function click(selector: string): Promise<boolean> {
-  return (await exec({ __test__: 'click', selector })).ok;
+/** Dispatch a real click on the first (or `index`-th) match. Returns false if nothing matched. */
+export async function click(selector: string, index = 0): Promise<boolean> {
+  return (await exec({ __test__: 'click', selector, index })).ok;
+}
+
+/** Messages the webview posted to the host, newest last (optionally of one type). */
+export async function posted(type?: string): Promise<Array<Record<string, unknown>>> {
+  return (await exec({ __test__: 'posted', ...(type ? { type } : {}) })).messages;
+}
+
+/** Attach an image the way a paste does (data: URL). Resolves once it is pending. */
+export async function addImage(dataUrl: string, name = 'image.png'): Promise<number> {
+  return (await exec({ __test__: 'addImage', dataUrl, name })).pending;
+}
+
+/** Send a webview→host message as one of the panel's own controls would. */
+export async function postToHost(message: Record<string, unknown>): Promise<void> {
+  await exec({ __test__: 'postToHost', message });
+}
+
+/** Press a key on the composer (or `selector`), e.g. Enter with altKey to queue. */
+export async function keydown(key: string, mods: { altKey?: boolean; shiftKey?: boolean; selector?: string } = {}): Promise<boolean> {
+  return (await exec({ __test__: 'keydown', key, ...mods })).ok;
+}
+
+/** Type into any text field (e.g. the server forms) and fire its input event. */
+export async function fill(selector: string, value: string): Promise<boolean> {
+  return (await exec({ __test__: 'fill', selector, value })).ok;
 }
 
 /** Set a <select>'s value and fire change (drives picker controls). */

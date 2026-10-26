@@ -51,7 +51,7 @@ import {
 import { isTodoCardCollapsed, summarizeTodos, Todo } from '../core/todos';
 import { buildAnswers, isEmptyAnswer, parseQuestionBlob, QInfo } from '../core/question';
 import type { MessageWithParts, OpencodeEvent, Part } from '../opencode/protocol';
-import type { HostToWebview, UiAgent, UiCommand, UiGoal, UiImage, UiMcpServer, UiModel, UiServer, UiSession, UiSkill, WebviewToHost } from '../shared';
+import type { HostToWebview, UiAgent, UiCommand, UiDelivery, UiGoal, UiImage, UiInboxItem, UiMcpServer, UiModel, UiServer, UiSession, UiSkill, WebviewToHost } from '../shared';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -63,7 +63,14 @@ declare function acquireVsCodeApi(): {
 declare const __TEST__: boolean;
 
 const vscode = acquireVsCodeApi();
+/** Under __TEST__ only: the most recent messages posted to the host, for assertions. */
+const postedForTest: WebviewToHost[] = [];
+
 function post(msg: WebviewToHost): void {
+  if (__TEST__) {
+    postedForTest.push(msg);
+    postedForTest.splice(0, Math.max(0, postedForTest.length - 50));
+  }
   vscode.postMessage(msg);
 }
 
@@ -310,6 +317,7 @@ function build(): void {
           <button id="goal-clear" class="goal-btn" title="Clear goal">${icon.trash}</button>
         </span>
       </div>
+      <div id="inbox-strip" class="inbox-strip hidden" aria-live="polite"></div>
       <div class="composer-box">
         <div id="ctx-meter" class="ctx-edge" title="Context window usage"><div class="ctx-fill"></div></div>
         <span class="ctx-label" id="ctx-tip"></span>
@@ -545,9 +553,10 @@ function build(): void {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      // Runs while busy too: Enter with text STEERS the in-flight turn
-      // (onSend handles it); Enter on an empty box does nothing.
-      onSend();
+      // Runs while busy too: Enter with text STEERS the in-flight turn, and
+      // Alt+Enter QUEUES it for after the turn (onSend handles both); Enter on
+      // an empty box does nothing.
+      onSend(e.altKey ? 'queue' : 'steer');
     }
   });
   inputEl.addEventListener('input', () => {
@@ -1313,7 +1322,7 @@ function runSlashCommand(text: string): boolean {
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
-function onSend(): void {
+function onSend(delivery: UiDelivery = 'steer'): void {
   if (state.compacting) {
     return; // input is blocked while a /compact runs
   }
@@ -1331,8 +1340,12 @@ function onSend(): void {
     }
     if (!text.startsWith('/')) {
       // One-shot ack. It shares the activity strip with the working ticker
-      // now, so clear it after a beat instead of squatting on the line.
-      const notice = 'Steering — the agent will pick this up at its next step.';
+      // now, so clear it after a beat instead of squatting on the line. The
+      // message itself waits in the pending strip until the agent takes it.
+      const notice =
+        delivery === 'queue'
+          ? 'Queued — it will run when the current turn finishes.'
+          : 'Steering — the agent will pick this up at its next step.';
       setStatus(notice);
       setTimeout(() => {
         if (activityStatus === notice) {
@@ -1387,6 +1400,7 @@ function onSend(): void {
     includeActiveFile: !!(state.activeFile && state.includeActiveFile),
     // The current selection is always attached silently when present.
     includeSelection: !!state.activeSelection,
+    delivery,
   });
 }
 
@@ -2380,6 +2394,7 @@ function renderMeter(): void {
 // Message + part rendering
 // ---------------------------------------------------------------------------
 function clearConversation(): void {
+  setInbox([]);
   messageEls.clear();
   partState.clear();
   roleByMessage.clear();
@@ -3445,6 +3460,8 @@ function setStatus(text: string, kind?: 'info' | 'warn' | 'error'): void {
   renderActivity();
 }
 
+const BUSY_PLACEHOLDER = 'Steer the agent — Enter to steer now, ⌥/Alt+Enter to queue for after this turn';
+
 function setBusy(busy: boolean): void {
   state.busy = busy;
   sendBtn.classList.toggle('busy', busy);
@@ -3477,7 +3494,7 @@ function syncSendEnabled(): void {
     sendBtn.disabled = false;
     sendBtn.innerHTML = icon.stop;
     sendBtn.title = 'Stop';
-    inputEl.placeholder = 'Ask anything, paste an image, or describe a task…';
+    inputEl.placeholder = BUSY_PLACEHOLDER;
     return;
   }
   const ready = selectedModelReady();
@@ -3688,6 +3705,74 @@ function renderConversationInner(messages: MessageWithParts[]): void {
 // ---------------------------------------------------------------------------
 // OpenCode event handling
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Pending strip: messages sent while the agent works, until it picks them up
+// ---------------------------------------------------------------------------
+let inboxItems: UiInboxItem[] = [];
+/**
+ * A message sent to an idle agent is delivered within milliseconds; holding the
+ * render back briefly keeps it from flashing through the strip on every send.
+ */
+const INBOX_SHOW_DELAY_MS = 250;
+let inboxRenderTimer: ReturnType<typeof setTimeout> | undefined;
+
+function setInbox(items: UiInboxItem[]): void {
+  inboxItems = items.slice();
+  renderInbox();
+}
+
+function addInboxItem(item: UiInboxItem): void {
+  if (!item.inboxID || inboxItems.some((i) => i.inboxID === item.inboxID)) {
+    return;
+  }
+  inboxItems.push(item);
+  clearTimeout(inboxRenderTimer);
+  inboxRenderTimer = setTimeout(renderInbox, INBOX_SHOW_DELAY_MS);
+}
+
+function updateInboxItem(inboxID: string, delivery: UiDelivery): void {
+  const item = inboxItems.find((i) => i.inboxID === inboxID);
+  if (item) {
+    item.delivery = delivery;
+    renderInbox();
+  }
+}
+
+function removeInboxItem(inboxID: string): void {
+  const before = inboxItems.length;
+  inboxItems = inboxItems.filter((i) => i.inboxID !== inboxID);
+  if (inboxItems.length !== before) {
+    renderInbox();
+  }
+}
+
+function renderInbox(): void {
+  clearTimeout(inboxRenderTimer);
+  const strip = document.getElementById('inbox-strip')!;
+  strip.classList.toggle('hidden', inboxItems.length === 0);
+  strip.innerHTML = '';
+  for (const item of inboxItems) {
+    const steer = item.delivery === 'steer';
+    const row = document.createElement('div');
+    row.className = `inbox-item ${item.delivery}`;
+    const attach = item.files ? ` <span class="inbox-files">+${item.files} attachment${item.files === 1 ? '' : 's'}</span>` : '';
+    row.innerHTML = `
+      <span class="inbox-badge" title="${steer ? 'Picked up at the agent\'s next step' : 'Runs after the current turn finishes'}">${steer ? 'Steering' : 'Queued'}</span>
+      <span class="inbox-text" title="${escapeHtml(item.text)}">${escapeHtml(item.text)}${attach}</span>
+      <span class="inbox-actions">
+        <button class="inbox-btn inbox-toggle" title="${steer ? 'Hold it until the current turn finishes' : 'Hand it to the agent at its next step'}">${steer ? 'Queue instead' : 'Steer now'}</button>
+        <button class="inbox-btn inbox-cancel" title="Cancel — the agent never sees it">${icon.close}</button>
+      </span>`;
+    row.querySelector('.inbox-toggle')!.addEventListener('click', () => {
+      post({ type: 'inboxSetDelivery', inboxID: item.inboxID, delivery: steer ? 'queue' : 'steer' });
+    });
+    row.querySelector('.inbox-cancel')!.addEventListener('click', () => {
+      post({ type: 'inboxCancel', inboxID: item.inboxID });
+    });
+    strip.appendChild(row);
+  }
+}
+
 function handleEvent(event: OpencodeEvent): void {
   const p = event.properties as any;
   switch (event.type) {
@@ -3785,6 +3870,21 @@ function handleEvent(event: OpencodeEvent): void {
     case 'file.edited':
       // Subtle chip noting an edited file (deduped per render is not critical).
       break;
+    case 'inbox.enqueued':
+      addInboxItem({ inboxID: p.inboxID, text: p.text ?? '', delivery: p.delivery === 'queue' ? 'queue' : 'steer', files: p.files ?? 0 });
+      break;
+    case 'inbox.changed':
+      updateInboxItem(p.inboxID, p.delivery === 'queue' ? 'queue' : 'steer');
+      break;
+    case 'inbox.delivered':
+    case 'inbox.cancelled':
+      removeInboxItem(p.inboxID);
+      break;
+    case 'session.retry':
+      // The provider failed transiently and OpenCode is retrying the step:
+      // say so, or a stalled-looking turn reads as a hang.
+      showWorking(`Retrying (attempt ${p.attempt ?? 2})${p.message ? ` — ${p.message}` : ''}`);
+      break;
   }
 }
 
@@ -3874,6 +3974,9 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.sessions = msg.sessions;
       state.currentSessionID = msg.currentSessionID;
       renderHistory();
+      break;
+    case 'inbox':
+      setInbox(msg.items);
       break;
     case 'sessionLoaded':
       state.currentSessionID = msg.sessionID;
@@ -3979,7 +4082,8 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
 // ---------------------------------------------------------------------------
 // Lets integration tests drive + inspect the webview over the postMessage
 // channel: { __test__: 'query', id, selector, prop } reads an element's text or
-// attribute; { __test__: 'click', id, selector } dispatches a real click. The
+// attribute; { __test__: 'click', id, selector, index? } dispatches a real
+// click; { __test__: 'posted', id, type? } returns what the webview posted. The
 // result is posted back as { __test__: 'result', id, ... }. No eval is exposed.
 function installTestHook(): void {
   window.addEventListener('message', (e: MessageEvent<any>) => {
@@ -4002,10 +4106,36 @@ function installTestHook(): void {
                 : el.getAttribute(m.prop as string);
         reply({ count: els.length, value: els[0] ? read(els[0]) : null, values: els.map(read) });
       } else if (m.__test__ === 'click') {
-        const el = document.querySelector(m.selector as string) as HTMLElement | null;
+        // `index` picks the n-th match (default the first).
+        const el = document.querySelectorAll(m.selector as string)[Number(m.index ?? 0)] as HTMLElement | undefined;
         if (el) {
           el.click();
         }
+        reply({ ok: !!el });
+      } else if (m.__test__ === 'posted') {
+        // Messages the webview sent to the host (newest last), optionally of
+        // one type — lets a test assert what a click asked the host to do.
+        const type = m.type as string | undefined;
+        reply({ messages: postedForTest.filter((x) => !type || x.type === type) });
+      } else if (m.__test__ === 'addImage') {
+        // Attach an image through the same path a paste or drop takes.
+        void fetch(String(m.dataUrl))
+          .then((r) => r.blob())
+          .then((blob) => addImage(new File([blob], String(m.name ?? 'image.png'), { type: blob.type })))
+          .then(() => reply({ ok: true, pending: state.pendingImages.length }));
+        return;
+      } else if (m.__test__ === 'postToHost') {
+        // Send a message exactly as one of the webview's own controls would
+        // (selectModel, selectAgent, ...) — for picks whose rows carry no id.
+        post(m.message as WebviewToHost);
+        reply({ ok: true });
+      } else if (m.__test__ === 'keydown') {
+        // A real key event on an element (default: the composer), so tests can
+        // exercise shortcuts like Alt+Enter the way a user presses them.
+        const el = (m.selector ? document.querySelector(m.selector as string) : inputEl) as HTMLElement | null;
+        el?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: String(m.key), altKey: !!m.altKey, shiftKey: !!m.shiftKey, bubbles: true, cancelable: true }),
+        );
         reply({ ok: !!el });
       } else if (m.__test__ === 'setInput') {
         // Set the composer textarea value and fire the input event, so tests can
@@ -4013,6 +4143,14 @@ function installTestHook(): void {
         inputEl.value = String(m.value ?? '');
         inputEl.dispatchEvent(new Event('input', { bubbles: true }));
         reply({ ok: true });
+      } else if (m.__test__ === 'fill') {
+        // Type into any text field (the server forms), firing input like a user.
+        const el = document.querySelector(m.selector as string) as HTMLInputElement | null;
+        if (el) {
+          el.value = String(m.value ?? '');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        reply({ ok: !!el });
       } else if (m.__test__ === 'setSelect') {
         // Set a <select>'s value and fire change, the way a user picking an
         // option would (click() can't open a native dropdown in tests).

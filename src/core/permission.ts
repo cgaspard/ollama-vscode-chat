@@ -4,9 +4,9 @@
  * unit-testable and safe to bundle into the webview.
  *
  * OpenCode flattens the `permission` object into an ordered rule list where
- * the LAST matching rule wins and key order is preserved (verified against the
- * bundled 1.18.26: `"permission": "allow"` normalizes to `{"*": "allow"}`),
- * so the wildcard must come first and per-tool overrides after it.
+ * the LAST matching rule wins and key order is preserved, so the wildcard must
+ * come first and per-tool overrides after it. OpenCode 2 still accepts this
+ * 1.x object form and converts it to its rule list.
  */
 
 export type PermissionMode = 'default' | 'strict' | 'bypass';
@@ -23,10 +23,12 @@ export function normalizePermissionMode(value: unknown): PermissionMode {
 /**
  * The `permission` block for the injected OpenCode config.
  *
- * - default: OpenCode's own posture — most tools run without asking; risky
- *   actions (paths outside the workspace, .env reads, doom loops) still prompt.
- *   `question` is allowed because the question picker IS the interaction; an
- *   approval gate before it would ask permission to ask.
+ * - default: most tools run without asking; risky actions (paths outside the
+ *   workspace, .env reads) still prompt. OpenCode 2's own defaults ask for
+ *   .env reads but ALLOW outside paths, so `external_directory` is asked for
+ *   explicitly to keep that promise. `question` is allowed because the
+ *   question picker IS the interaction; an approval gate before it would ask
+ *   permission to ask.
  * - strict: every tool call prompts (except `question`, per the above).
  * - bypass: the wildcard allows everything — no approval prompts at all.
  *   `deny` is never emitted: a blanket deny would remove tools from the
@@ -39,7 +41,7 @@ export function opencodePermission(mode: PermissionMode): Record<string, 'allow'
     case 'strict':
       return { '*': 'ask', question: 'allow' };
     default:
-      return { question: 'allow' };
+      return { question: 'allow', external_directory: 'ask' };
   }
 }
 
