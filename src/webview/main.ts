@@ -2521,6 +2521,12 @@ function mdToHtml(src: string): string {
   const raw = marked.parse(src ?? '', { async: false, gfm: true, breaks: true }) as string;
   const tpl = document.createElement('template');
   tpl.innerHTML = raw;
+  // A literal <template> in model output (a Vue snippet outside a fence, or a
+  // compaction summary echoing OpenCode's "<template>" prompt) parses as an
+  // inert template whose content never renders: unwrap it so the text shows.
+  for (let t = tpl.content.querySelector('template'); t; t = tpl.content.querySelector('template')) {
+    t.replaceWith(t.content);
+  }
   tpl.content.querySelectorAll('script,iframe,object,embed,link,meta,style').forEach((n) => n.remove());
   tpl.content.querySelectorAll('*').forEach((el) => {
     for (const attr of Array.from(el.attributes)) {
