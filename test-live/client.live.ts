@@ -5,7 +5,7 @@
 //   npm run test:live            (builds, then runs under VS Code's own runtime)
 //
 // Env: LIVE_OLLAMA (default http://127.0.0.1:11434), LIVE_AGENT_MODEL (default
-// qwen3.8:27b-mxfp8).
+// LIVE_MODEL, qwen3-vl:2b).
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -73,6 +73,7 @@ async function main(): Promise<void> {
       parts: [{ type: 'text', text: 'Use the write tool to create live.txt containing exactly: embedded ok. Then reply with one short sentence.' }],
     });
     check('turn reaches idle', !!(await idle(s.id, mark)));
+    for (const e of events.slice(mark).filter((e) => e.type === 'session.retry' || e.type === 'session.error')) console.log('   ', e.type, JSON.stringify(e.properties).slice(0, 300));
     const written = fs.existsSync(path.join(ws, 'live.txt')) ? fs.readFileSync(path.join(ws, 'live.txt'), 'utf8') : '';
     check('write tool ran', written.includes('embedded ok'), written);
     const tys = new Set(events.slice(mark).map((e) => e.type));

@@ -168,7 +168,7 @@ export class ChatBridge {
         const cadence = this.connected ? this.healthIntervalMs() : OFFLINE_HEALTH_INTERVAL_MS;
         return this.deps.ollama.probeHealth(Math.floor(cadence * 0.8));
       },
-      serverHealthy: () => this.deps.server.isRunning && !!this.client,
+      serverHealthy: () => this.deps.server.isRunning && !!this.client && !this.engineChanged(),
       isConnected: () => this.connected,
       goOffline: () => this.markOffline(),
       connect: () => this.init(),
@@ -223,7 +223,12 @@ export class ChatBridge {
     );
     // Closing a tab is the one way context goes stale silently — see
     // pruneClosedContext.
-    this.tabsSub = vscode.window.tabGroups.onDidChangeTabs(() => this.pruneClosedContext());
+    this.tabsSub = vscode.Disposable.from(
+      vscode.window.tabGroups.onDidChangeTabs(() => this.pruneClosedContext()),
+      // A tab-change event can arrive while the closing editor is still listed
+      // as visible; the visible-editors change that follows settles it.
+      vscode.window.onDidChangeVisibleTextEditors(() => this.pruneClosedContext()),
+    );
     // Self-heal when the shared OpenCode server dies unexpectedly. Without this
     // the panel keeps reporting `connected` against a dead client forever.
     this.serverExitSub = this.deps.server.addExitListener(() => this.onServerExit());
@@ -355,7 +360,17 @@ export class ChatBridge {
 
   /** True when Ollama is reachable and we have a live OpenCode client. */
   private isLive(): boolean {
-    return this.connected && !!this.client && this.deps.server.isRunning;
+    return this.connected && !!this.client && this.deps.server.isRunning && !this.engineChanged();
+  }
+
+  /**
+   * Whether the engine this panel holds was stopped since it connected: none
+   * runs now, or another one does (Restart OpenCode Server, a settings change
+   * another panel picked up first). Its client then fails every call with
+   * "OpenCode engine stopped", so the panel must reconnect before using it.
+   */
+  private engineChanged(): boolean {
+    return !!this.client && !this.deps.server.isCurrent(this.client);
   }
 
   /**
@@ -365,7 +380,7 @@ export class ChatBridge {
    * success. Returns whether we are live afterwards.
    */
   private async reconnect(): Promise<boolean> {
-    if (!this.deps.server.isRunning) {
+    if (!this.deps.server.isRunning || this.engineChanged()) {
       this.teardownConnection(false);
     }
     return this.healer.reconnect();
@@ -533,7 +548,7 @@ export class ChatBridge {
       // OpenCode Server". The health loop would notice within a tick, but the
       // message in hand would already have failed against the stopped engine —
       // so heal first.
-      if (msg.type !== 'ready' && this.client && !this.deps.server.isRunning) {
+      if (msg.type !== 'ready' && this.engineChanged()) {
         log('engine was restarted since this panel connected; reconnecting before handling the message');
         await this.reconnect();
       }
@@ -1384,6 +1399,7 @@ export class ChatBridge {
   private async askThrowaway(title: string, prompt: string, system: string): Promise<string> {
     const client = this.client!;
     const session = await client.createSession(title);
+    const started = Date.now();
     try {
       // Judge verdicts want speed, not deliberation: pin reasoning off via the
       // variant rather than the qwen-only `/no_think` string, so it works across
@@ -1409,12 +1425,14 @@ export class ChatBridge {
           .reverse()
           .find((m) => m.info.role === 'assistant' && m.info.time?.completed);
         if (done) {
+          log(`${title}: answered in ${Date.now() - started}ms`);
           return (done.parts ?? [])
             .filter((p): p is Extract<typeof p, { type: 'text' }> => p.type === 'text')
             .map((p) => (p as { text?: string }).text ?? '')
             .join('\n');
         }
       }
+      log(`${title}: no answer within 120s`);
       return '';
     } finally {
       void client.deleteSession(session.id).catch(() => undefined);
@@ -2088,8 +2106,11 @@ export class ChatBridge {
     try {
       // Same provider id the prompt uses (see handleSend) so the server resolves
       // the summarizer model against the Ollama provider.
-      await this.client.summarize(sessionID, 'ollama', this.currentModel);
-      summary = (await this.compactionState(sessionID)).summary;
+      summary = await this.client.summarize(sessionID, 'ollama', this.currentModel);
+      if (!summary) {
+        summary = (await this.compactionState(sessionID)).summary;
+      }
+      log(`compaction finished (${summary.length} chars of summary)`);
     } catch (err) {
       // The request is only the trigger. OpenCode runs the summarization to
       // completion even when our connection drops, so a thrown request does not

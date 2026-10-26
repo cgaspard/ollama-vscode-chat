@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ExtensionConfig, getConfig } from '../config';
-import { augmentedPath, withLocalEnvironment } from '../core/mcp';
+import { augmentedPath, toEngineMcp, withLocalEnvironment } from '../core/mcp';
 import { opencodePermission } from '../core/permission';
 import { toEngineProviderID } from '../core/providerIds';
 import { OllamaClient } from '../ollama/client';
@@ -68,6 +68,15 @@ export class OpencodeServerManager {
   }
 
   /**
+   * Whether `client` is the running engine's client. After a restart a new
+   * engine is running (isRunning is true again) but a panel can still hold
+   * the old, stopped client.
+   */
+  isCurrent(client: OpencodeV2Client | undefined): boolean {
+    return !!client && client === this.client;
+  }
+
+  /**
    * Whether the running engine's config declares `modelID` — at context window
    * `numCtx`, when given. Both are baked in when the engine starts: a model
    * pulled since is unknown to it, and a context chosen since (a per-model
@@ -120,7 +129,7 @@ export class OpencodeServerManager {
     if (generation !== this.generation) {
       // Disposed while starting (a settings change, a restart): this engine is
       // already stale. Close it rather than hand it out.
-      void host.close().catch((err: unknown) => logError('closing a superseded engine', err));
+      await host.close().catch((err: unknown) => logError('closing a superseded engine', err));
       throw new Error('OpenCode engine stopped');
     }
     this.host = host;
@@ -217,7 +226,8 @@ export class OpencodeServerManager {
       // list renders from it.
       experimental: { todo: true },
       provider,
-      ...(Object.keys(mcp).length ? { mcp } : {}),
+      // Native shape, with Code Mode off (see toEngineMcp).
+      ...(Object.keys(mcp).length ? { mcp: toEngineMcp(mcp) } : {}),
     };
     const declared = Object.entries(provider).flatMap(([, p]) =>
       Object.entries(((p as { models?: Record<string, { limit: { context: number } }> }).models ?? {})).map(

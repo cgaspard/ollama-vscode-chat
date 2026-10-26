@@ -183,6 +183,7 @@ let sessionTotals = newSessionTotals();
 // Decision logic lives in ../core/compaction (pure + unit-tested).
 const compaction: CompactionState = newCompactionState();
 let lastCompactionChip: HTMLElement | null = null; // so the summary can be attached when it arrives
+let pendingCompactionSummary = ''; // a summary that arrived before its chip
 
 // ---------------------------------------------------------------------------
 // Icons
@@ -1179,6 +1180,11 @@ function showCompactionChip(): HTMLElement {
   });
   messagesEl.appendChild(el);
   lastCompactionChip = el;
+  if (pendingCompactionSummary) {
+    const summary = pendingCompactionSummary;
+    pendingCompactionSummary = '';
+    attachCompactionSummary(summary);
+  }
   toggleWelcome();
   scrollToBottom();
   return el;
@@ -1186,14 +1192,18 @@ function showCompactionChip(): HTMLElement {
 
 // Attach the summary markdown OpenCode produced to the most recent chip, making
 // it expandable. Called when the bridge reports the compaction finished.
+// The summary and the marker that creates the chip travel separately, so the
+// summary can arrive first: then it waits for the chip instead of landing on
+// an earlier compaction's chip (or nowhere).
 function attachCompactionSummary(summary: string): void {
-  const chip = lastCompactionChip;
-  if (!chip || !summary.trim()) {
+  if (!summary.trim()) {
     return;
   }
-  const head = chip.querySelector('.compaction-head') as HTMLButtonElement | null;
-  const body = chip.querySelector('.compaction-body') as HTMLElement | null;
-  if (!head || !body) {
+  const chip = lastCompactionChip;
+  const head = chip?.querySelector('.compaction-head') as HTMLButtonElement | null;
+  const body = chip?.querySelector('.compaction-body') as HTMLElement | null;
+  if (!head || !body || !head.disabled) {
+    pendingCompactionSummary = summary;
     return;
   }
   body.innerHTML = mdToHtml(summary);
@@ -2404,6 +2414,7 @@ function clearConversation(): void {
   compaction.suppressed.clear();
   compaction.pending = false;
   lastCompactionChip = null;
+  pendingCompactionSummary = '';
   state.pendingCompaction = false;
   todoCards.clear();
   todoCollapsed.clear();
@@ -4118,11 +4129,15 @@ function installTestHook(): void {
         const type = m.type as string | undefined;
         reply({ messages: postedForTest.filter((x) => !type || x.type === type) });
       } else if (m.__test__ === 'addImage') {
-        // Attach an image through the same path a paste or drop takes.
-        void fetch(String(m.dataUrl))
-          .then((r) => r.blob())
-          .then((blob) => addImage(new File([blob], String(m.name ?? 'image.png'), { type: blob.type })))
-          .then(() => reply({ ok: true, pending: state.pendingImages.length }));
+        // Attach an image through the same path a paste or drop takes. Decode
+        // the data: URL by hand — the webview's CSP does not allow fetching it.
+        const [head, b64] = String(m.dataUrl).split(',');
+        const type = /^data:([^;,]+)/.exec(head)?.[1] ?? 'application/octet-stream';
+        const bytes = Uint8Array.from(atob(b64 ?? ''), (c) => c.charCodeAt(0));
+        void addImage(new File([bytes], String(m.name ?? 'image.png'), { type })).then(
+          () => reply({ ok: true, pending: state.pendingImages.length }),
+          (err: unknown) => reply({ error: String(err) }),
+        );
         return;
       } else if (m.__test__ === 'postToHost') {
         // Send a message exactly as one of the webview's own controls would

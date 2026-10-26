@@ -29,6 +29,13 @@ const COMPACT_TIMEOUT_MS = 900000;
 /** Ceiling for one SDK call, as the 1.x HTTP client had per request. */
 const REQ_TIMEOUT_MS = 30000;
 
+/** Longest we wait for a fresh engine to finish loading its agents, commands and skills. */
+const CATALOG_READY_MS = 15000;
+/** How long we wait for the engine to announce that load before falling back to polling. */
+const CATALOG_EVENT_WAIT_MS = 5000;
+/** The events a loaded workspace catalog announces itself with, one per list. */
+const CATALOG_EVENTS = ['agent.updated', 'command.updated', 'skill.updated'];
+
 /** Reject with a TimeoutError (which the bridge treats as a lost connection) after `ms`. */
 function withTimeout<T>(p: Promise<T> | T, ms: number, what: string): Promise<T> {
   if (!(p instanceof Promise)) {
@@ -68,6 +75,10 @@ export class OpencodeV2Client {
   /** The SDK host behind a guard: see `guard`. */
   private readonly host: SdkHost;
   private closed = false;
+  /** Resolves once the workspace's agents, commands and skills are loaded: see `catalogReady`. */
+  private catalog: Promise<void> | undefined;
+  /** Which of CATALOG_EVENTS the engine has announced. */
+  private readonly catalogLoaded = new Set<string>();
 
   constructor(
     host: SdkHost,
@@ -76,6 +87,9 @@ export class OpencodeV2Client {
     readonly version: string,
   ) {
     this.host = this.guard(host, []);
+    // Listen from the start: the catalog-loaded announcements (catalogReady)
+    // come once, a few hundred milliseconds after the first request.
+    this.ensureUpstream();
   }
 
   /**
@@ -118,7 +132,49 @@ export class OpencodeV2Client {
 
   // ---- Catalog ---------------------------------------------------------------
 
+  /**
+   * A freshly created engine answers catalog calls before it has read the
+   * workspace, and then fills its lists in stages: empty, then the built-ins
+   * (build, plan; init, review), then the workspace's own agents and commands,
+   * then skills (~50 / 100 / 170 / 200 ms after the first request). The panel
+   * lists them right after start, so it could show a picker without the
+   * user's agents and a slash menu without their commands. The engine
+   * announces each list once it is loaded (agent.updated, command.updated,
+   * skill.updated), so wait for all three — or, should those never come, for
+   * at least the built-in agents — before the first catalog answer.
+   */
+  private catalogReady(): Promise<void> {
+    if (!this.catalog) {
+      this.catalog = (async () => {
+        this.ensureUpstream(); // normally already running (see the constructor)
+        const start = Date.now();
+        // A request is what makes the engine load this workspace.
+        let res = await this.host.agent.list(this.location);
+        while (this.catalogLoaded.size < CATALOG_EVENTS.length && Date.now() - start < CATALOG_EVENT_WAIT_MS) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (this.catalogLoaded.size >= CATALOG_EVENTS.length) {
+          return;
+        }
+        log('embedded opencode: catalog load not announced; waiting for the agent list instead');
+        while (Date.now() - start < CATALOG_READY_MS) {
+          if (((res?.data ?? res ?? []) as unknown[]).length) {
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 100));
+          res = await this.host.agent.list(this.location);
+        }
+        log('embedded opencode: agents still empty after waiting; continuing');
+      })().catch((err) => {
+        this.catalog = undefined; // a failed probe must not wedge later calls
+        throw err;
+      });
+    }
+    return this.catalog;
+  }
+
   async listProviders(): Promise<ProvidersResponse> {
+    await this.catalogReady();
     const [models, providers] = await Promise.all([this.host.model.list(this.location), this.host.provider.list(this.location)]);
     const names = new Map<string, string>(((providers?.data ?? []) as any[]).map((p) => [String(p.id), String(p.name ?? p.id)]));
     const byProvider = new Map<string, ProviderInfo>();
@@ -156,6 +212,7 @@ export class OpencodeV2Client {
   }
 
   async listAgents(): Promise<AgentsResponse> {
+    await this.catalogReady();
     const res = await this.host.agent.list(this.location);
     // v2's `name` is a display label ("Build"); the id is what switchAgent and
     // the 1.x code (and the user's settings) call it.
@@ -171,11 +228,13 @@ export class OpencodeV2Client {
   }
 
   async listCommands(): Promise<CommandsResponse> {
+    await this.catalogReady();
     const res = await this.host.command.list(this.location);
     return ((res?.data ?? res ?? []) as any[]).map((c) => ({ ...c, name: String(c.name ?? c.id), description: c.description }));
   }
 
   async listSkills(): Promise<SkillsResponse> {
+    await this.catalogReady();
     const res = await this.host.skill.list(this.location);
     return ((res?.data ?? res ?? []) as any[]).map((s) => ({
       ...s,
@@ -187,11 +246,14 @@ export class OpencodeV2Client {
   }
 
   async listMcp(): Promise<McpStatusResponse> {
+    await this.catalogReady();
     const res = await this.host.mcp.list(this.location);
     const rows: any[] = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
     const out: McpStatusResponse = {};
     for (const s of rows) {
-      out[String(s.name ?? s.id)] = { ...s, status: String(s.status?.type ?? s.status ?? 'pending'), error: s.status?.error ?? s.error };
+      // v2: { name, status: { status: 'connected' | 'pending' | 'disabled' | 'failed' | 'needs_auth', error? } }
+      const st = s.status && typeof s.status === 'object' ? s.status : { status: s.status };
+      out[String(s.name ?? s.id)] = { ...s, status: String(st.status ?? 'pending'), error: st.error ?? s.error };
     }
     return out;
   }
@@ -336,7 +398,7 @@ export class OpencodeV2Client {
    * bridge was built for 1.x, which held the call open until the summary
    * existed, so wait for the outcome here.
    */
-  async summarize(sessionID: string, _providerID: string, _modelID: string): Promise<void> {
+  async summarize(sessionID: string, _providerID: string, _modelID: string): Promise<string> {
     const done = this.waitFor(
       (e) => (e.type === 'session.compacted' || e.type === 'session.error') && (e.properties as any).sessionID === sessionID,
       COMPACT_TIMEOUT_MS,
@@ -346,6 +408,9 @@ export class OpencodeV2Client {
     if (outcome?.type === 'session.error') {
       throw new Error(String((outcome.properties as any).error?.data?.message ?? 'Compaction failed'));
     }
+    // The summary rides on the completion event. Reading it back from history
+    // right away can race the engine persisting the completed compaction.
+    return String((outcome?.properties as any)?.summary ?? '');
   }
 
   // ---- Steering inbox ------------------------------------------------------------
@@ -415,6 +480,9 @@ export class OpencodeV2Client {
     void (async () => {
       try {
         for await (const e of this.host.event.subscribe(undefined, { signal: ac.signal })) {
+          if (CATALOG_EVENTS.includes(e?.type)) {
+            this.catalogLoaded.add(e.type);
+          }
           for (const out of this.translator.translate(e)) {
             this.emit(out);
           }

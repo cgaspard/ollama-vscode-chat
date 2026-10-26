@@ -8,8 +8,9 @@
 //   npm run test:live -- provider
 //
 // Env: LIVE_OLLAMA (default http://127.0.0.1:11434), LIVE_MODEL (default
-// qwen3:0.6b, a thinking model), LIVE_TOOL_MODEL (default LIVE_MODEL),
-// LIVE_VISION_MODEL (default qwen3-vl:2b).
+// qwen3-vl:2b: tools, vision and thinking in one small model), and
+// LIVE_TOOL_MODEL / LIVE_VISION_MODEL (default LIVE_MODEL), LIVE_THINKING_MODEL
+// (default qwen3:0.6b).
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
@@ -25,14 +26,17 @@ import { OpencodeV2Client } from '../src/opencode/v2client';
 
 const REPO = path.resolve(__dirname, '..');
 const OLLAMA = process.env.LIVE_OLLAMA ?? 'http://127.0.0.1:11434';
-const MODEL = process.env.LIVE_MODEL ?? 'qwen3:0.6b';
+const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:2b';
 const TOOL_MODEL = process.env.LIVE_TOOL_MODEL ?? MODEL;
-const VISION = process.env.LIVE_VISION_MODEL ?? 'qwen3-vl:2b';
+const VISION = process.env.LIVE_VISION_MODEL ?? MODEL;
+// qwen3-vl:2b keeps streaming thinking with `think: false` (Ollama 0.40.11),
+// so thinking on/off is shown on the smallest model that honours it.
+const THINK = process.env.LIVE_THINKING_MODEL ?? 'qwen3:0.6b';
 // Deliberately odd windows, so a match cannot be Ollama's default by accident.
-const CTX = 20480;
+const CTX = 24576;
 // Both clear the engine's own prompt and tools (~11k tokens), or it compacts
 // before the first request.
-const VISION_CTX = 24576;
+const VISION_CTX = 28672;
 // A 64x64 solid red PNG (the same image as the e2e workspace's red.png).
 const RED_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeUlEQVR4nO3PQQkAMAzAwIqof2UTMxF7HINABFzm7H7dcEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFj12qxUDxeFqrFAAAAABJRU5ErkJggg==';
@@ -104,7 +108,7 @@ async function main(): Promise<void> {
 
   // The model facts the extension itself would use (capabilities from /api/show).
   const discovered = await new OllamaClient(OLLAMA).listModels();
-  const wanted = [...new Set([MODEL, TOOL_MODEL, VISION])];
+  const wanted = [...new Set([MODEL, TOOL_MODEL, VISION, THINK])];
   const models = discovered.filter((m) => wanted.includes(m.id));
   check('the test models are installed', models.length === wanted.length, discovered.map((m) => m.id));
   const engineID = toEngineProviderID(OLLAMA_PROVIDER_ID);
@@ -116,7 +120,8 @@ async function main(): Promise<void> {
       npm,
       models,
       defaultCtx: CTX,
-      ctxOverride: (id) => (id === VISION ? VISION_CTX : undefined),
+      // A per-model window, when the vision model is a model of its own.
+      ctxOverride: (id) => (id === VISION && VISION !== MODEL ? VISION_CTX : undefined),
     }),
   };
 
@@ -176,12 +181,20 @@ async function main(): Promise<void> {
     check('requests go to the native /api/chat endpoint', off.chats.length > 0, off.chats.length);
     check(`num_ctx ${CTX} is on the wire`, offChat.options?.num_ctx === CTX, offChat.options);
     check(`Ollama loaded ${MODEL} at ${CTX} (GET /api/ps)`, (await loadedContext(MODEL)) === CTX, await loadedContext(MODEL));
-    check('variant off sends think:false', offChat.think === false, offChat.think);
-    check('variant off: no reasoning part', !off.reasoning, off.reasoning.slice(0, 80));
+    check(`${MODEL}: variant off sends think:false`, offChat.think === false, offChat.think);
 
-    // (4) think on
-    const on = await turn(s.id, {
-      model: { ...provider, modelID: MODEL },
+    // (4) think off / on, on a model that honours think:false
+    const th = await client.createSession('ollama thinking');
+    const thOff = await turn(th.id, {
+      model: { ...provider, modelID: THINK },
+      agent: 'build',
+      variant: 'off',
+      parts: [{ type: 'text', text: 'What is 6 + 7? Answer with just the number.' }],
+    });
+    check(`${THINK}: variant off sends think:false`, (thOff.chats.slice(-1)[0] ?? {}).think === false);
+    check('variant off: no reasoning generated', !thOff.reasoning && /13/.test(thOff.text), { reasoning: thOff.reasoning.slice(0, 60), text: thOff.text.slice(0, 60) });
+    const on = await turn(th.id, {
+      model: { ...provider, modelID: THINK },
       agent: 'build',
       variant: 'high',
       parts: [{ type: 'text', text: 'What is 17 + 25? Answer with just the number.' }],
@@ -224,7 +237,8 @@ async function main(): Promise<void> {
     if (process.env.LIVE_DEBUG) console.log(JSON.stringify(vChat.messages?.slice(-1), (k, v) => (typeof v === 'string' && v.length > 300 ? v.slice(0, 300) : v)), vision.text, JSON.stringify(vision.msgs.find((m) => m.info.role === 'user')?.parts).slice(0, 600));
     check('the image went out on /api/chat', images.length === 1, images.map((i: string) => i.slice(0, 16)));
     check('the vision model saw red', /red/i.test(vision.text), vision.text.slice(0, 120));
-    check(`per-model window: ${VISION} at ${VISION_CTX}`, vChat.options?.num_ctx === VISION_CTX && (await loadedContext(VISION)) === VISION_CTX, { wire: vChat.options, ps: await loadedContext(VISION) });
+    const want = VISION !== MODEL ? VISION_CTX : CTX;
+    check(`${VISION} runs at ${want}`, vChat.options?.num_ctx === want && (await loadedContext(VISION)) === want, { wire: vChat.options, ps: await loadedContext(VISION) });
   } catch (err) {
     check('unexpected exception', false, String((err as Error)?.stack ?? err));
   } finally {

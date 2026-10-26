@@ -140,10 +140,19 @@ test('non-question forms are not shown as questions', () => {
   assert.equal(out.length, 0);
 });
 
-test('compaction completion reports session.compacted with the summary', () => {
-  const { out } = run(fx.compaction);
-  assert.equal(out[0].type, 'session.compacted');
-  assert.match(String((out[0].properties as any).summary), /Objective/);
+test('a live compaction renders as the marker + summary pair, then session.compacted', () => {
+  const t = new EventTranslator();
+  t.translate({ type: 'session.compaction.started', data: { sessionID: 'ses_c', inputID: 'msg_c1', reason: 'manual' } });
+  const out = fx.compaction.flatMap((e) => t.translate({ ...e, data: { ...e.data, sessionID: 'ses_c' } }));
+  const parts = out.filter((e) => e.type === 'message.part.updated').map((e) => (e.properties as any).part);
+  assert.equal(parts[0].type, 'compaction', 'the marker comes first');
+  const firstMsg = out.find((e) => e.type === 'message.updated')!.properties as any;
+  assert.equal(firstMsg.info.role, 'assistant', 'no message.updated for the marker (it would draw an empty user bubble)');
+  assert.equal(parts[1].messageID, 'msg_c1', 'the summary turn takes the compaction id, as history does');
+  assert.match(String(parts[1].text), /Objective/);
+  assert.equal(out.at(-1)!.type, 'session.compacted');
+  const hist = v1History('ses_c', [{ id: 'msg_c1', type: 'compaction', text: 'x', time: { created: 1 } }]);
+  assert.deepEqual(hist.map((m) => m.info.id), [parts[0].messageID, 'msg_c1'], 'live and reloaded compactions share ids');
 });
 
 test('history comes back oldest first, a turn\'s steps folded into one message', () => {

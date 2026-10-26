@@ -128,6 +128,9 @@ export function activate(context: vscode.ExtensionContext): void {
         const s = await servers.add('Test', url);
         await servers.setActive(s.id);
         ollama.setBaseUrl(servers.active().url);
+        // The running engine was configured for the previous server; panels
+        // reconnect to a fresh one built for this URL.
+        server?.dispose();
       }),
     );
   }

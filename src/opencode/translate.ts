@@ -251,6 +251,8 @@ export class EventTranslator {
    * them).
    */
   private readonly turns = new Map<string, string>();
+  /** session id -> the inbox id of its running compaction. */
+  private readonly compactions = new Map<string, string>();
   /** step message id -> its turn message id. */
   private readonly stepTurn = new Map<string, string>();
   private readonly text = new Map<string, string>();
@@ -380,8 +382,32 @@ export class EventTranslator {
         return [ev('session.retry', { sessionID: sid, attempt: d.attempt, at: d.at, message: errorMessage(d.error) })];
 
       // -- compaction ----------------------------------------------------------
-      case 'session.compaction.ended':
-        return [ev('session.compacted', { sessionID: sid, summary: d.text ?? '' })];
+      case 'session.compaction.started':
+        if (sid && d.inputID) {
+          this.compactions.set(sid, String(d.inputID));
+        }
+        return [];
+      case 'session.compaction.ended': {
+        // The webview shows a compaction as a marker message followed by the
+        // summarizer's turn, folded into one expandable chip — the 1.x shape,
+        // which v1History also produces for a reloaded session (same ids).
+        const id = (sid && this.compactions.get(sid)) || `compaction:${sid}:${Date.now()}`;
+        if (sid) {
+          this.compactions.delete(sid);
+        }
+        const now = Date.now();
+        const summary = String(d.text ?? '');
+        const [marker, summaryTurn] = compactionMessages(sid ?? '', id, summary, now);
+        return [
+          // The marker goes as its part alone: the webview recognises the part
+          // and never builds a bubble for the marker's (user) message, whereas
+          // a message.updated first would leave an empty user bubble behind.
+          ...marker.parts.map((p) => ev('message.part.updated', { part: p })),
+          ev('message.updated', { info: summaryTurn.info }),
+          ...summaryTurn.parts.map((p) => ev('message.part.updated', { part: p })),
+          ev('session.compacted', { sessionID: sid, summary }),
+        ];
+      }
       case 'session.compaction.failed':
         return [ev('session.error', { sessionID: sid, error: v1Error(d.error) })];
 
@@ -502,6 +528,24 @@ export class EventTranslator {
   }
 }
 
+/**
+ * A compaction as the 1.x pair the webview folds into one chip: a marker
+ * message, then the summarizer's turn carrying the summary text.
+ */
+function compactionMessages(sid: string, id: string, summary: string, created: number): MessageWithParts[] {
+  const marker = `${id}:marker`;
+  return [
+    {
+      info: { id: marker, sessionID: sid, role: 'user', time: { created } },
+      parts: [{ id: `${marker}:part`, sessionID: sid, messageID: marker, type: 'compaction' }],
+    },
+    {
+      info: { id, sessionID: sid, role: 'assistant', time: { created } },
+      parts: summary ? [{ id: textPartId(id, 0), sessionID: sid, messageID: id, type: 'text', text: summary }] : [],
+    },
+  ];
+}
+
 /** The 1.x events for one user message (bubble + its text and attachments). */
 function userMessageEvents(sid: string, mid: string, payload: any, created: number): OpencodeEvent[] {
   const msg = userMessage(sid, mid, payload, created);
@@ -562,19 +606,9 @@ export function v1History(sessionID: string, rows: any[]): MessageWithParts[] {
       case 'user':
         out.push(userMessage(sessionID, m.id, { text: m.text, files: m.files }, created));
         break;
-      case 'compaction': {
-        const marker = `${m.id}:marker`;
-        out.push({
-          info: { id: marker, sessionID, role: 'user', time: { created } },
-          parts: [{ id: `${marker}:part`, sessionID, messageID: marker, type: 'compaction' }],
-        });
-        const summary = String(m.text ?? m.summary ?? m.payload?.text ?? '');
-        out.push({
-          info: { id: m.id, sessionID, role: 'assistant', time: { created } },
-          parts: summary ? [{ id: textPartId(m.id, 0), sessionID, messageID: m.id, type: 'text', text: summary }] : [],
-        });
+      case 'compaction':
+        out.push(...compactionMessages(sessionID, String(m.id), String(m.text ?? m.summary ?? m.payload?.text ?? ''), created));
         break;
-      }
       default:
         break; // idle markers, synthetic notes: not chat (but they do end a turn)
     }

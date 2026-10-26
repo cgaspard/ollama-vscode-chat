@@ -7,13 +7,14 @@ import { OLLAMA_PROVIDER_ID, ollamaProviderConfig, providerModuleUrl } from '../
 
 export const REPO = path.resolve(__dirname, '..');
 export const OLLAMA = process.env.LIVE_OLLAMA ?? 'http://127.0.0.1:11434';
-/** A small thinking model with tools. */
-export const MODEL = process.env.LIVE_MODEL ?? 'qwen3:0.6b';
 /**
- * A model that follows multi-step agent instructions reliably (the client
- * suite's codeword-after-a-tool and abort-mid-essay checks are beyond 0.6B).
+ * One small model for every live check — Ollama is shared hardware, and a
+ * single resident model keeps the runs from evicting each other. qwen3-vl:2b
+ * covers all of it: tools, vision and thinking.
  */
-export const AGENT_MODEL = process.env.LIVE_AGENT_MODEL ?? 'qwen3.8:27b-mxfp8';
+export const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:2b';
+/** The model for the agent-style checks (override with LIVE_AGENT_MODEL). */
+export const AGENT_MODEL = process.env.LIVE_AGENT_MODEL ?? MODEL;
 export const PROVIDER = OLLAMA_PROVIDER_ID;
 export const ENGINE_PROVIDER = toEngineProviderID(OLLAMA_PROVIDER_ID);
 
