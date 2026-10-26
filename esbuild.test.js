@@ -17,6 +17,10 @@ if (!entryPoints.length) {
   process.exit(1);
 }
 
+// Start clean: a test whose source was deleted must not keep running from a
+// stale out-test/*.js.
+fs.rmSync(path.join(__dirname, 'out-test'), { recursive: true, force: true });
+
 esbuild
   .build({
     entryPoints,

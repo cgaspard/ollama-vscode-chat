@@ -12,9 +12,10 @@ out-test/
 .claude/scheduled_tasks.lock
 # Bundled OpenCode binary is fetched at package time, never committed.
 bin/
-# Ollama provider staged at package time by scripts/bundle-provider.js. The
-# patched source it wraps lives in vendor/ and IS committed.
-opencode-provider/
+# Ollama provider bundled at package time by scripts/bundle-provider.js. The
+# patched source it wraps lives in vendor/ and IS committed. Anchored: an
+# unanchored rule would also swallow a scripts/ folder of the same name.
+/opencode-provider/
 out-integration/
 .vscode-test/
 # Local scratch / agent-demo artifacts (not part of the extension).
@@ -29,3 +30,8 @@ sample-workspace/.opencode/**/node_modules/
 
 # Graphoxide code-graph output, regenerated on demand.
 /graphoxide-out/
+
+# Embedded OpenCode engine, built by scripts/build-opencode-sdk.js at package
+# time. Anchored: scripts/opencode-sdk/ (the bun:sqlite adapter) IS source.
+/opencode-sdk/
+out-live/

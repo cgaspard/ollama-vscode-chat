@@ -20,7 +20,7 @@ export interface Session {
 export interface ProviderInfo {
   id: string;
   name: string;
-  models: Record<string, { name?: string }>;
+  models: Record<string, { name?: string; [key: string]: unknown }>;
 }
 
 export interface ProvidersResponse {

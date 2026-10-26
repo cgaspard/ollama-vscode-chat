@@ -46,3 +46,5 @@ tsconfig.integration.json
 .mcp.json
 opencode.json
 graphoxide-out/**
+test-live/**
+out-live/**
