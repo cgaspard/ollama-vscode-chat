@@ -5,7 +5,7 @@
 // Opt-in (it needs a model and takes a minute; Ollama is shared hardware, so
 // run it under the model lock): LIVE_UI=1 npm run test:integration
 // Optional: LIVE_OLLAMA (default http://127.0.0.1:11434),
-//           LIVE_MODEL (default qwen3-vl:2b).
+//           LIVE_MODEL (default qwen3-vl:4b-instruct).
 //
 // Prompts are text-only on purpose: this harness opens VS Code without a
 // workspace folder, so the agent's working directory is the home directory.
@@ -19,7 +19,7 @@ import * as helpers from './helpers';
 const { openPanel, count, allText, waitFor, setInput, keydown, attr, click } = helpers;
 const LIVE = process.env.LIVE_UI === '1';
 const OLLAMA = process.env.LIVE_OLLAMA ?? 'http://127.0.0.1:11434';
-const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:2b';
+const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:4b-instruct';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function until(pred: () => Promise<boolean>, ms: number, what: string): Promise<void> {

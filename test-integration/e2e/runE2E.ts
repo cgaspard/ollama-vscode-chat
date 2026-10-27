@@ -5,7 +5,7 @@
 //   npm run test:e2e
 //
 // Needs Ollama (default http://127.0.0.1:11434, override with E2E_OLLAMA) with
-// one small model with tools and vision (E2E_MODEL, default qwen3-vl:2b), plus
+// one small model with tools and vision (E2E_MODEL, default qwen3-vl:4b-instruct), plus
 // a small thinking model for the thinking on/off tests (E2E_THINKING_MODEL,
 // default qwen3:0.6b). Each run gets a fresh copy of
 // test-integration/e2e/workspace, so edits the agent makes never touch the repo.
@@ -28,7 +28,16 @@ async function main(): Promise<void> {
       extensionTestsPath: path.resolve(__dirname, 'index.js'),
       // A fresh profile per run, so a previous run's sessions and settings
       // cannot make a test pass.
-      launchArgs: [workspace, '--disable-extensions', `--user-data-dir=${fs.mkdtempSync(path.join(os.tmpdir(), 'ol-e2e-profile-'))}`],
+      launchArgs: [
+        workspace,
+        '--disable-extensions',
+        `--user-data-dir=${fs.mkdtempSync(path.join(os.tmpdir(), 'ol-e2e-profile-'))}`,
+        // A run takes half an hour; another window on top must not throttle
+        // this one's renderer (and with it the webview the suite drives).
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+      ],
       extensionTestsEnv: {
         E2E_WORKSPACE: workspace,
         OLLAMA_CODE_LOG_STDOUT: '1',

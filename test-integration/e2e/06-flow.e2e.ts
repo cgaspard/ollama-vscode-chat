@@ -56,7 +56,7 @@ describe('e2e · steering, stopping, questions, goals', function () {
 
   it('the agent can ask a question and gets the picked answer', async () => {
     await freshChat();
-    await send('Use the question tool to ask me to choose between the options "Red" and "Blue". After I answer, reply with "You chose" followed by my choice.');
+    await send('Call the question tool now to ask me one question with exactly two options, "Red" and "Blue". Use no other tools. After I answer, reply with "You chose" followed by my choice.');
     await until(async () => (await h.count('.question-card .question-opt')) > 0, 240_000, 'the question card');
     const opts = await h.allText('.question-card .question-opt');
     const blue = opts.findIndex((o) => /Blue/.test(o));

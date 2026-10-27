@@ -8,7 +8,7 @@
 //   npm run test:live -- provider
 //
 // Env: LIVE_OLLAMA (default http://127.0.0.1:11434), LIVE_MODEL (default
-// qwen3-vl:2b: tools, vision and thinking in one small model), and
+// qwen3-vl:4b-instruct: tools and vision in one small model), and
 // LIVE_TOOL_MODEL / LIVE_VISION_MODEL (default LIVE_MODEL), LIVE_THINKING_MODEL
 // (default qwen3:0.6b).
 import { execFileSync } from 'node:child_process';
@@ -26,11 +26,11 @@ import { OpencodeV2Client } from '../src/opencode/v2client';
 
 const REPO = path.resolve(__dirname, '..');
 const OLLAMA = process.env.LIVE_OLLAMA ?? 'http://127.0.0.1:11434';
-const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:2b';
+const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:4b-instruct';
 const TOOL_MODEL = process.env.LIVE_TOOL_MODEL ?? MODEL;
 const VISION = process.env.LIVE_VISION_MODEL ?? MODEL;
-// qwen3-vl:2b keeps streaming thinking with `think: false` (Ollama 0.40.11),
-// so thinking on/off is shown on the smallest model that honours it.
+// The default model does not think, so thinking on/off is shown on the
+// smallest thinking model (it honours `think: false`).
 const THINK = process.env.LIVE_THINKING_MODEL ?? 'qwen3:0.6b';
 // Deliberately odd windows, so a match cannot be Ollama's default by accident.
 const CTX = 24576;

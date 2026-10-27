@@ -5,7 +5,7 @@
 //   npm run test:live            (builds, then runs under VS Code's own runtime)
 //
 // Env: LIVE_OLLAMA (default http://127.0.0.1:11434), LIVE_AGENT_MODEL (default
-// LIVE_MODEL, qwen3-vl:2b).
+// LIVE_MODEL, qwen3-vl:4b-instruct).
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -81,7 +81,13 @@ async function main(): Promise<void> {
     const msgs = await client.getMessages(s.id);
     const lastText = msgs.filter((m) => m.info.role === 'assistant').flatMap((m) => m.parts).filter((p) => p.type === 'text').map((p: any) => p.text).join(' ');
     check('getMessages returns the turn once, oldest-first', msgs[0]?.info.role === 'user' && msgs.filter((m) => m.info.role === 'user').length === 1 && msgs.some((m) => m.parts.some((p) => p.type === 'tool')), msgs.map((m) => m.info.role));
-    check('system instructions reached the model', /PINEAPPLE-42/.test(lastText), lastText.slice(-120));
+    // Whether a model appends the codeword to a tool turn is up to the model;
+    // asking for it directly shows the instruction reached it.
+    mark = events.length;
+    await client.promptAsync(s.id, { model, agent: 'build', variant: 'off', parts: [{ type: 'text', text: 'What is the secret codeword? Answer with the codeword only.' }] });
+    await idle(s.id, mark);
+    const answer = (await client.getMessages(s.id)).filter((m) => m.info.role === 'assistant').flatMap((m) => m.parts).filter((p) => p.type === 'text').map((p: any) => p.text).join(' ');
+    check('system instructions reached the model', /PINEAPPLE-42/.test(lastText) || /PINEAPPLE-42/.test(answer), answer.slice(-120));
 
     // -- steering: queue while busy, flip to steer, cancel another --------------
     mark = events.length;

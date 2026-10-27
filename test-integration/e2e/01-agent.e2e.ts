@@ -90,7 +90,7 @@ describe('e2e · the agent', function () {
 
   it('a reasoning model shows its thinking in a collapsible block', async () => {
     await freshChat({ model: THINKING_MODEL });
-    await setEffort('high');
+    await setEffort('high', { required: true });
     await ask('What is 17 * 23? Think it through, then answer with just the number.', 600_000);
     assert.match(await assistantText(), /391/);
     assert.ok((await h.count('.part-reasoning')) > 0, 'a thinking block rendered');

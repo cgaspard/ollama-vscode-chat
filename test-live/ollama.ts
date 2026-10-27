@@ -9,10 +9,10 @@ export const REPO = path.resolve(__dirname, '..');
 export const OLLAMA = process.env.LIVE_OLLAMA ?? 'http://127.0.0.1:11434';
 /**
  * One small model for every live check — Ollama is shared hardware, and a
- * single resident model keeps the runs from evicting each other. qwen3-vl:2b
- * covers all of it: tools, vision and thinking.
+ * single resident model keeps the runs from evicting each other. qwen3-vl:4b-instruct
+ * covers tools and vision, without thinking.
  */
-export const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:2b';
+export const MODEL = process.env.LIVE_MODEL ?? 'qwen3-vl:4b-instruct';
 /** The model for the agent-style checks (override with LIVE_AGENT_MODEL). */
 export const AGENT_MODEL = process.env.LIVE_AGENT_MODEL ?? MODEL;
 export const PROVIDER = OLLAMA_PROVIDER_ID;

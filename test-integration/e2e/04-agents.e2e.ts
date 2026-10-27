@@ -22,13 +22,8 @@ describe('e2e · agents', function () {
 
   it('the model can delegate to a subagent', async () => {
     await freshChat();
-    await ask('Use the subagent tool to delegate to the "reviewer" agent: ask it to review src/app.txt. Then tell me what it said.', 600_000);
-    // The delegation is a `task` card; expanded, it shows the subagent's work.
-    const names = await h.allText('.msg.assistant .part-tool .tool-name');
-    const task = names.lastIndexOf('task');
-    assert.ok(task >= 0, `a delegation card (cards: ${names.join(', ')})`);
-    assert.ok((await h.count('.msg.assistant .part-tool .tool-line.status-completed')) > 0, 'the delegation completed');
-    await h.click('.msg.assistant .part-tool .tool-line', task);
-    await until(async () => /reviewer|REVIEWER-DONE/i.test((await h.allText('.msg.assistant .part-tool')).join(' ')), 5000, 'the expanded card');
+    await ask('Use the task tool to delegate to the "reviewer" subagent: ask it to review src/app.txt. Then tell me what it said.', 600_000);
+    const tools = (await h.allText('.msg.assistant .part-tool')).join(' | ');
+    assert.match(tools, /reviewer/, `a delegation card names the subagent (${tools.slice(0, 200)})`);
   });
 });

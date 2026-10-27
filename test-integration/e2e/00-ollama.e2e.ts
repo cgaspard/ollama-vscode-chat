@@ -90,12 +90,12 @@ describe('e2e · Ollama', function () {
 
   it('thinking switched off sends no reasoning; switched on, it streams a thinking block', async () => {
     await freshChat({ model: THINKING_MODEL });
-    await setEffort('off');
+    await setEffort('off', { required: true });
     assert.match(await ask('What is 6 * 7? Answer with just the number.'), /42/);
     assert.strictEqual(await reasoningBlocks(), 0, 'no thinking block with thinking off');
 
     await freshChat({ model: THINKING_MODEL });
-    await setEffort('high');
+    await setEffort('high', { required: true });
     assert.match(await ask('What is 6 * 8? Answer with just the number.'), /48/);
     assert.ok((await reasoningBlocks()) > 0, 'a thinking block with thinking on');
   });

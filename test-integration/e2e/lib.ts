@@ -9,15 +9,14 @@ import * as h from '../suite/helpers';
 export const OLLAMA = process.env.E2E_OLLAMA ?? 'http://127.0.0.1:11434';
 /**
  * One small model for the run — Ollama is shared hardware, and a single
- * resident model keeps the suite from evicting other work. qwen3-vl:2b has
- * tools and vision, so it covers every feature but one.
+ * resident model keeps the suite from evicting other work. qwen3-vl:4b-instruct has
+ * tools and vision and does not think, so turns stay short.
  */
-export const MODEL = process.env.E2E_MODEL ?? 'qwen3-vl:2b';
+export const MODEL = process.env.E2E_MODEL ?? 'qwen3-vl:4b-instruct';
 export const VISION_MODEL = process.env.E2E_VISION_MODEL ?? MODEL;
 /**
- * The thinking on/off tests need a model that honours `think: false`:
- * qwen3-vl:2b keeps streaming thinking with it off (Ollama 0.40.11), so those
- * two tests use the smallest thinking model instead.
+ * The thinking on/off tests need a model that thinks, and honours
+ * `think: false`: the smallest thinking model.
  */
 export const THINKING_MODEL = process.env.E2E_THINKING_MODEL ?? 'qwen3:0.6b';
 /**
@@ -111,11 +110,24 @@ export async function useModel(model: string): Promise<void> {
   await closeMenus();
 }
 
-/** Pick a Thinking level in the behavior menu (auto | off | low | medium | high). */
-export async function setEffort(level: string): Promise<void> {
+/**
+ * Pick a Thinking level in the behavior menu (auto | off | low | medium | high).
+ * A model that does not think gets no Thinking control at all, so for it this
+ * is a no-op — unless `required`, for the tests that are about thinking.
+ */
+export async function setEffort(level: string, opts: { required?: boolean } = {}): Promise<void> {
   await h.click('#behavior-btn');
   await until(async () => (await h.count('#behavior-menu:not(.hidden)')) > 0, 5000, 'the behavior menu');
-  assert(await h.click(`#effort-presets .effort-dot[data-level="${level}"]`), `the ${level} thinking level is offered`);
+  const dot = `#effort-presets .effort-dot[data-level="${level}"]`;
+  // The model's capabilities can land a moment after it is selected.
+  const offered = await until(async () => (await h.count(dot)) > 0, opts.required ? 15_000 : 3000, `the ${level} thinking level`).then(
+    () => true,
+    () => false,
+  );
+  assert(offered || !opts.required, `the ${level} thinking level is offered`);
+  if (offered) {
+    await h.click(dot);
+  }
   await h.click('#behavior-btn');
 }
 

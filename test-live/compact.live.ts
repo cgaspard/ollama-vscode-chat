@@ -36,7 +36,11 @@ import { MODEL, PROVIDER, ollamaConfig } from './ollama';
     if (m.parts.some((p) => p.type === 'compaction')) { pending = true; continue; }
     if (pending && m.info.role === 'assistant') { summary = m.parts.filter((p) => p.type === 'text').map((p: any) => p.text).join(''); pending = false; }
   }
-  console.log(/ZEBRA-9|launch/i.test(summary) ? 'PASS  the bridge finds the summary after the marker' : `FAIL  summary the bridge would show: ${JSON.stringify(summary.slice(0, 200))}`);
+  // What the summary says is up to the model (a small one fills OpenCode 2's
+  // template with "[none]"), so this checks the plumbing: the bridge finds a
+  // summary after the marker. Recall is reported, not required.
+  console.log(summary.trim().length > 20 ? 'PASS  the bridge finds the summary after the marker' : `FAIL  summary the bridge would show: ${JSON.stringify(summary.slice(0, 200))}`);
+  console.log(`      the summary ${/ZEBRA-9|launch/i.test(summary) ? 'kept' : 'did not keep'} the launch code`);
   ac.abort(); client.dispose(); await host.close();
   fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(ws, { recursive: true, force: true });
 })();

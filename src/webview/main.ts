@@ -2016,6 +2016,7 @@ function renderModelMenu(): void {
       post({ type: 'selectModel', modelID: m.id });
       renderModels();
       renderMeter();
+      applyEffort(); // the Thinking control follows the newly selected model
       syncSendEnabled(); // a newly-selected model may not be loaded → gate Send
       closeModelMenu();
     });
@@ -2024,6 +2025,7 @@ function renderModelMenu(): void {
         state.currentModel = m.id;
         post({ type: 'selectModel', modelID: m.id });
         renderMeter();
+        applyEffort();
         closeMenuOnLoad = true; // dismiss the menu once this load completes
       }
       beginModelLoad(m.id, 'load');
@@ -2805,7 +2807,17 @@ function renderTool(el: HTMLElement, part: { tool: string; state: any }, partId:
   const status = st.status ?? 'pending';
   const input = st.input ?? {};
   const filePath = input.filePath || input.path || input.file;
-  const title = st.title && st.title !== part.tool ? st.title : filePath ? String(filePath) : '';
+  // A `task` call is a delegation to a subagent. Surface WHICH one — otherwise
+  // every delegation looks identical and you can't tell that your custom agent
+  // was actually picked up.
+  const subagent = part.tool === 'task' ? String(input.subagent_type ?? '') : '';
+  const title = subagent
+    ? `→ ${subagent}${st.title && st.title !== part.tool ? ` · ${st.title}` : ''}`
+    : st.title && st.title !== part.tool
+      ? st.title
+      : filePath
+        ? String(filePath)
+        : '';
   const statusIcon =
     status === 'completed' ? '✓' : status === 'error' ? '✕' : status === 'running' ? '●' : '·';
   const collapsed = toolCollapsed.get(partId) ?? true;
