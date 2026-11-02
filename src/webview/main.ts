@@ -3260,13 +3260,13 @@ function renderQuestion(requestID: string | null, questions: QInfo[]): void {
   backBtn?.addEventListener('click', () => show(active - 1));
   nextBtn?.addEventListener('click', () => show(active + 1));
 
-  const lock = (note: string) => {
-    card.querySelectorAll('button, input').forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  // An answered or skipped card goes away. The `question` tool row keeps the
+  // answer (the text fallback sends it as a message), and a card left behind
+  // sat below the agent's next output, still looking like it wanted input.
+  const dismiss = () => {
     card.classList.add('resolved');
-    const n = document.createElement('div');
-    n.className = 'question-resolved';
-    n.textContent = note;
-    card.appendChild(n);
+    card.remove();
+    toggleWelcome();
   };
 
   const submit = () => {
@@ -3287,7 +3287,7 @@ function renderQuestion(requestID: string | null, questions: QInfo[]): void {
         .join('\n');
       post({ type: 'send', text, effort: 'off' });
     }
-    lock(`Answered: ${answers.map((a) => a.join(', ')).filter(Boolean).join(' · ')}`);
+    dismiss();
   };
 
   submitBtn.addEventListener('click', submit);
@@ -3298,7 +3298,7 @@ function renderQuestion(requestID: string | null, questions: QInfo[]): void {
     if (requestID) {
       post({ type: 'questionReject', requestID });
     }
-    lock('Skipped');
+    dismiss();
   });
 
   messagesEl.appendChild(card);
@@ -3311,8 +3311,9 @@ function renderQuestion(requestID: string | null, questions: QInfo[]): void {
 function resolveQuestion(id: string): void {
   const card = questionEls.get(id);
   if (card && !card.classList.contains('resolved')) {
-    card.querySelectorAll('button, input').forEach((b) => ((b as HTMLButtonElement).disabled = true));
     card.classList.add('resolved');
+    card.remove();
+    toggleWelcome();
   }
 }
 
