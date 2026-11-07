@@ -125,6 +125,12 @@ export type HostToWebview =
       cwd: string;
       serverReady: boolean;
       ollamaConnected: boolean;
+      /**
+       * Set when the server URL failed only because of its scheme (https:// to
+       * Ollama's plain-http server, or the reverse): `to` is the same URL with
+       * the other scheme, confirmed to answer.
+       */
+      ollamaSchemeFix?: { from: string; to: string };
       minContext: number;
       keepAlive: string;
       /** Fallback effort for models with no per-model choice stored yet. */

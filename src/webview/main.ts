@@ -88,6 +88,8 @@ interface State {
   busy: boolean;
   serverReady: boolean;
   ollamaConnected: boolean;
+  /** The active server answers only on the other scheme (see shared.ts). */
+  ollamaSchemeFix: { from: string; to: string } | null;
   /** Reasoning depth per model id. Effort is a per-model property. */
   effortByModel: Record<string, EffortLevel>;
   /** Configured fallback when a model has no stored choice. */
@@ -129,6 +131,7 @@ const state: State = {
   busy: false,
   serverReady: false,
   ollamaConnected: false,
+  ollamaSchemeFix: null,
   effortByModel: persisted.effortByModel ?? {},
   defaultEffort: 'auto',
   permissionMode: 'default',
@@ -2285,17 +2288,33 @@ function renderConnection(): void {
   }
   const active = state.servers.find((s) => s.id === state.activeServerId);
   connBanner.classList.remove('hidden');
+  // Only while the URL it was diagnosed for is still the active one.
+  const fix = active && state.ollamaSchemeFix?.from === active.url ? state.ollamaSchemeFix : null;
+  const toScheme = fix ? fix.to.slice(0, fix.to.indexOf(':')) : '';
+  const fromScheme = fix ? fix.from.slice(0, fix.from.indexOf(':')) : '';
+  const title = fix ? `Ollama answers over ${toScheme}, not ${fromScheme}` : "Can't reach Ollama";
+  const sub = fix
+    ? `<code>${escapeHtml(fix.from)}</code> fails, but <code>${escapeHtml(fix.to)}</code> responds.`
+    : `<code>${escapeHtml(active?.url ?? '')}</code> isn't responding — start the server or switch.`;
   connBanner.innerHTML = `
     <span class="conn-ico"><svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 100 20 10 10 0 000-20zm-1 5h2v7h-2V7zm0 9h2v2h-2v-2z"/></svg></span>
     <span class="conn-text">
-      <span class="conn-title">Can't reach Ollama</span>
-      <span class="conn-sub"><code>${escapeHtml(active?.url ?? '')}</code> isn't responding — start the server or switch.</span>
+      <span class="conn-title">${title}</span>
+      <span class="conn-sub">${sub}</span>
     </span>
     <span class="conn-actions">
       <button class="conn-btn" id="conn-retry">Retry</button>
-      <button class="conn-btn primary" id="conn-servers">Servers</button>
+      ${fix ? `<button class="conn-btn primary" id="conn-fix-scheme">Use ${toScheme}</button>` : ''}
+      <button class="conn-btn${fix ? '' : ' primary'}" id="conn-servers">Servers</button>
     </span>`;
   connBanner.querySelector('#conn-retry')!.addEventListener('click', () => post({ type: 'retryConnect' }));
+  if (fix && active) {
+    // An ordinary server edit with the same name. The host reconnects because
+    // the active server's URL changed.
+    connBanner.querySelector('#conn-fix-scheme')!.addEventListener('click', () =>
+      post({ type: 'updateServer', id: active.id, name: active.name, url: fix.to }),
+    );
+  }
   connBanner.querySelector('#conn-servers')!.addEventListener('click', (e) => {
     e.stopPropagation();
     // Servers live in the combined model menu now.
@@ -3935,6 +3954,7 @@ window.addEventListener('message', (e: MessageEvent<HostToWebview>) => {
       state.agent = msg.agent;
       state.serverReady = msg.serverReady;
       state.ollamaConnected = msg.ollamaConnected;
+      state.ollamaSchemeFix = msg.ollamaSchemeFix ?? null;
       state.minContext = msg.minContext;
       state.agents = msg.agents ?? [];
       state.defaultEffort = msg.defaultEffort ?? 'auto';

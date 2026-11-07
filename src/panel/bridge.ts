@@ -28,6 +28,7 @@ import { type PermissionMode, normalizePermissionMode } from '../core/permission
 import { ConnectResult, SelfHealer } from '../core/reconnect';
 import { ProbeStatus } from '../core/health';
 import { pickModel } from '../core/models';
+import { alternateSchemeUrl } from '../core/scheme';
 import { isContextLive, selectionLabel } from '../core/selection';
 import { emptySessionCandidates } from '../core/sessions';
 import { classifySkills } from '../core/skills';
@@ -807,11 +808,18 @@ export class ChatBridge {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
 
     this.post({ type: 'status', text: `Connecting to ${active.name}…` });
-    this.connected = await this.deps.ollama.checkConnection();
+    const upstream = await this.deps.ollama.checkConnectionStatus();
+    this.connected = upstream === 'ok';
     this.postServers(this.connected);
 
     // Offline: show the connection screen and wait for retry / switch.
     if (!this.connected) {
+      // A hard failure may be nothing but the wrong scheme (https:// typed for
+      // Ollama, which serves plain http). Name that instead of "can't reach".
+      // The webview applies the fix only while `from` is still the active URL.
+      const schemeTo =
+        upstream === 'unreachable' && (await this.deps.ollama.diagnoseScheme()) ? alternateSchemeUrl(active.url) : undefined;
+      const schemeFix = schemeTo ? { from: active.url, to: schemeTo } : undefined;
       // The webview now shows models: [] — resync the periodic diff-guard so
       // the next healthy refresh always posts (a stale healthy snapshot here
       // would suppress it and freeze the picker on "No models found").
@@ -824,14 +832,18 @@ export class ChatBridge {
         cwd,
         serverReady: false,
         ollamaConnected: false,
+        ollamaSchemeFix: schemeFix,
         minContext: cfg.minContextLength,
         keepAlive: this.keepAlive(),
         agents: [],
         defaultEffort: cfg.defaultThinkingEffort,
         permissionMode: cfg.permissionMode,
       });
-      this.post({ type: 'status', text: `Can't reach Ollama at ${active.url}`, kind: 'warn' });
-      log(`doInit: Ollama unreachable at ${active.url}`);
+      const text = schemeFix
+        ? `${active.name} answers at ${schemeFix.to}, not ${active.url}`
+        : `Can't reach Ollama at ${active.url}`;
+      this.post({ type: 'status', text, kind: 'warn' });
+      log(`doInit: Ollama ${upstream} at ${active.url}${schemeFix ? ` (answers at ${schemeFix.to})` : ''}`);
       // No backoff for this — the poll recovers the moment Ollama answers again.
       return 'upstream-down';
     }

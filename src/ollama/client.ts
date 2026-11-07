@@ -8,6 +8,7 @@ import {
   type ShowDetail,
 } from '../core/discovery';
 import { ProbeStatus } from '../core/health';
+import { diagnoseScheme } from '../core/scheme';
 import { logError } from '../logger';
 
 /**
@@ -98,6 +99,16 @@ export class OllamaClient {
     } catch (err) {
       return isTimeoutError(err) ? 'timeout' : 'unreachable';
     }
+  }
+
+  /**
+   * After a connect attempt came back 'unreachable': is the URL's scheme the
+   * only problem? Returns the same root with http/https swapped when that one
+   * answers (Ollama serves no TLS, so `https://` never works against it).
+   * Only called on a failed user-facing connect, never from the health loop.
+   */
+  async diagnoseScheme(): Promise<string | undefined> {
+    return diagnoseScheme(this.rest, { probePath: '/api/version' });
   }
 
   async checkConnection(): Promise<boolean> {
